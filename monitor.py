@@ -28,7 +28,7 @@ _UA = (
 def _normalize_stream_url(url: str) -> str:
     p = urlparse(url)
     qs = parse_qs(p.query, keep_blank_values=True)
-    for key in ("_HLS_msn", "_HLS_part", "playlistType", "psch"):
+    for key in ("_HLS_msn", "_HLS_part"):
         qs.pop(key, None)
     return urlunparse(p._replace(query=urlencode(qs, doseq=True)))
 
@@ -63,6 +63,10 @@ def _record_with_ffmpeg(username: str, stream_url: str, cookies_list: list, outp
     cmd = [
         "ffmpeg", "-loglevel", "warning",
         "-headers", headers,
+        "-live_start_index", "-1",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
         "-i", stream_url,
         "-c", "copy",
         str(output_path),
