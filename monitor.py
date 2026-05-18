@@ -3,7 +3,7 @@ import subprocess
 import time
 import threading
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 
 import requests as req_lib
 from playwright.async_api import async_playwright
@@ -23,6 +23,14 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _strip_ll_hls_params(url: str) -> str:
+    p = urlparse(url)
+    qs = parse_qs(p.query, keep_blank_values=True)
+    qs.pop("_HLS_msn", None)
+    qs.pop("_HLS_part", None)
+    return urlunparse(p._replace(query=urlencode(qs, doseq=True)))
 
 
 def log(username: str, msg: str):
@@ -234,7 +242,7 @@ async def _record_async(username: str):
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, _record_with_ffmpeg, username, stream_url, cookies, output
+        None, _record_with_ffmpeg, username, _strip_ll_hls_params(stream_url), cookies, output
     )
     active_recordings.pop(username, None)
 
