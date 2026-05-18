@@ -25,11 +25,11 @@ _UA = (
 )
 
 
-def _strip_ll_hls_params(url: str) -> str:
+def _normalize_stream_url(url: str) -> str:
     p = urlparse(url)
     qs = parse_qs(p.query, keep_blank_values=True)
-    qs.pop("_HLS_msn", None)
-    qs.pop("_HLS_part", None)
+    for key in ("_HLS_msn", "_HLS_part", "playlistType", "psch"):
+        qs.pop(key, None)
     return urlunparse(p._replace(query=urlencode(qs, doseq=True)))
 
 
@@ -54,12 +54,8 @@ def is_live(username: str) -> bool:
 
 
 def _record_with_ffmpeg(username: str, stream_url: str, cookies_list: list, output_path: Path):
-    """
-    ffmpeg handles: master→variant selection, AES-128 segment decryption, live polling.
-    pkey-authenticated doppiocdn.net URLs don't need cookies — auth is in the URL.
-    """
     headers = f"User-Agent: {_UA}\r\nReferer: https://stripchat.com/{username}\r\n"
-    if cookies_list and "pkey=" not in stream_url:
+    if cookies_list:
         cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
         if cookie_str:
             headers = f"Cookie: {cookie_str}\r\n" + headers
@@ -242,7 +238,7 @@ async def _record_async(username: str):
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, _record_with_ffmpeg, username, _strip_ll_hls_params(stream_url), cookies, output
+        None, _record_with_ffmpeg, username, _normalize_stream_url(stream_url), cookies, output
     )
     active_recordings.pop(username, None)
 
