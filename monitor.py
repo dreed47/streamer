@@ -1,5 +1,4 @@
 import asyncio
-import subprocess
 import time
 import threading
 from pathlib import Path
@@ -53,34 +52,59 @@ def is_live(username: str) -> bool:
     return False
 
 
-def _record_with_ffmpeg(username: str, stream_url: str, cookies_list: list, output_path: Path):
-    headers = f"User-Agent: {_UA}\r\nReferer: https://stripchat.com/{username}\r\n"
+def _record_with_requests(username: str, stream_url: str, cookies_list: list, output_path: Path):
+    sess = req_lib.Session()
+    sess.headers.update({
+        "User-Agent": _UA,
+        "Referer": f"https://stripchat.com/{username}",
+    })
     if cookies_list:
-        cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
-        if cookie_str:
-            headers = f"Cookie: {cookie_str}\r\n" + headers
+        sess.headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
 
-    cmd = [
-        "ffmpeg", "-loglevel", "warning",
-        "-headers", headers,
-        "-live_start_index", "-1",
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-i", stream_url,
-        "-c", "copy",
-        str(output_path),
-    ]
+    base = stream_url.split("?")[0].rsplit("/", 1)[0] + "/"
+    seen: set[str] = set()
+    errors = 0
 
-    log(username, f"ffmpeg -> {output_path.name}")
-    proc = subprocess.Popen(cmd)
-    while proc.poll() is None:
-        if shutdown.is_set():
-            proc.terminate()
-            proc.wait()
-            break
-        time.sleep(5)
-    log(username, f"ffmpeg done (exit={proc.returncode}): {output_path.name}")
+    log(username, f"recording -> {output_path.name}")
+    with open(output_path, "wb") as f:
+        while not shutdown.is_set():
+            try:
+                resp = sess.get(stream_url, timeout=15)
+                resp.raise_for_status()
+                errors = 0
+            except Exception as e:
+                errors += 1
+                if errors >= 5:
+                    log(username, f"playlist error x5, stopping: {e}")
+                    break
+                time.sleep(2)
+                continue
+
+            lines = resp.text.splitlines()
+            for i, line in enumerate(lines):
+                if not line.startswith("#EXTINF") or i + 1 >= len(lines):
+                    continue
+                uri = lines[i + 1].strip()
+                if not uri or uri.startswith("#"):
+                    continue
+                seg_url = uri if uri.startswith("http") else base + uri
+                if seg_url in seen:
+                    continue
+                seen.add(seg_url)
+                try:
+                    sr = sess.get(seg_url, timeout=30)
+                    sr.raise_for_status()
+                    f.write(sr.content)
+                    f.flush()
+                except Exception as e:
+                    log(username, f"segment error: {e}")
+
+            if "#EXT-X-ENDLIST" in resp.text:
+                log(username, "stream ended")
+                break
+            time.sleep(1)
+
+    log(username, f"done: {output_path.name}")
 
 
 async def _record_async(username: str):
@@ -242,7 +266,7 @@ async def _record_async(username: str):
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
-        None, _record_with_ffmpeg, username, _normalize_stream_url(stream_url), cookies, output
+        None, _record_with_requests, username, _normalize_stream_url(stream_url), cookies, output
     )
     active_recordings.pop(username, None)
 
