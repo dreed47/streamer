@@ -9,9 +9,13 @@ services:
     mem_limit: 1536m
     memswap_limit: 1536m
     volumes:
-      - ./recordings:/recordings
+      - ./config.yml:/app/config.yml:ro
+    privileged: true
     environment:
       - TZ=${TZ:-Europe/London}   # change as needed
+      - SMB_PATH=${SMB_PATH}
+      - SMB_USERNAME=${SMB_USERNAME}
+      - SMB_PASSWORD=${SMB_PASSWORD}
     logging:
       driver: json-file
       options:

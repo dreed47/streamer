@@ -1,27 +1,74 @@
 import asyncio
+import os
+import re
+import subprocess
 import time
 import threading
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 
 import requests as req_lib
+import yaml
 from playwright.async_api import async_playwright
 
 # ==================== CONFIG ====================
-MODELS = ["GabrielaLove_"]
+def _load_config(path: str = "config.yml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+_CONFIG = _load_config()
+MODELS = _CONFIG["models"]
+TRANSCODE_CFG: dict = {
+    "enabled":       os.environ.get("TRANSCODE_ENABLED", "").lower() in ("1", "true", "yes"),
+    "codec":         os.environ.get("TRANSCODE_CODEC", "h264"),
+    "crf":           int(os.environ.get("TRANSCODE_CRF", "23")),
+    "preset":        os.environ.get("TRANSCODE_PRESET", "fast"),
+    "threads":       int(os.environ.get("TRANSCODE_THREADS", "0")),
+    "audio_bitrate": os.environ.get("TRANSCODE_AUDIO_BITRATE", "128k"),
+}
 RECORDINGS_DIR = Path("/recordings")
 RECORDINGS_DIR.mkdir(exist_ok=True)
 
-POLL_INTERVAL = 30
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 # ===============================================
 
 active_recordings = {}
+resume_after: dict[str, datetime] = {}
 shutdown = threading.Event()
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _next_poll_start(model: dict) -> datetime:
+    start_t = datetime.strptime(model["poll_start_time"], "%H:%M:%S").time()
+    today_start = datetime.combine(date.today(), start_t)
+    if datetime.now() < today_start:
+        return today_start
+    return datetime.combine(date.today() + timedelta(days=1), start_t)
+
+
+def _parse_duration(val) -> int:
+    if isinstance(val, int):
+        return val
+    total = 0
+    for amount, unit in re.findall(r'(\d+)\s*(h|m|s)', str(val).lower()):
+        total += int(amount) * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total
+
+
+def _parse_size(val) -> int:
+    if isinstance(val, int):
+        return val
+    units = {"kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(kb|mb|gb|tb)', str(val).strip().lower())
+    if m:
+        return int(float(m.group(1)) * units[m.group(2)])
+    return int(val)
 
 
 def _normalize_stream_url(url: str) -> str:
@@ -32,8 +79,63 @@ def _normalize_stream_url(url: str) -> str:
     return urlunparse(p._replace(query=urlencode(qs, doseq=True)))
 
 
+def _in_poll_window(model: dict) -> bool:
+    now = datetime.now().time()
+    start = datetime.strptime(model["poll_start_time"], "%H:%M:%S").time()
+    stop  = datetime.strptime(model["poll_stop_time"],  "%H:%M:%S").time()
+    return start <= now <= stop
+
+
 def log(username: str, msg: str):
     print(f"[{time.strftime('%H:%M:%S')}][{username}] {msg}", flush=True)
+
+
+def _transcode_file(username: str, path: Path, cfg: dict):
+    codec = cfg.get("codec", "h264").lower()
+    crf = int(cfg.get("crf", 23))
+    audio_br = cfg.get("audio_bitrate", "128k")
+    vcodec = "libx265" if codec == "h265" else "libx264"
+    preset = cfg.get("preset", "fast")
+    threads = str(cfg.get("threads", 0))
+
+    tmp = path.with_suffix(".transcoding.mp4")
+    tc_path = path.with_name(path.stem + "_tc" + path.suffix)
+    extra_v = ["-tag:v", "hvc1"] if codec == "h265" else []
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", str(path),
+        "-c:v", vcodec, "-crf", str(crf), "-preset", preset, "-threads", threads,
+        "-pix_fmt", "yuv420p",
+        *extra_v,
+        "-c:a", "aac", "-b:a", audio_br,
+        "-movflags", "+faststart",
+        "-y", str(tmp),
+    ]
+
+    size_mb = path.stat().st_size / 1024 / 1024
+    timeout_s = max(300, int(size_mb * 10))  # ~10s per MB, min 5min
+    log(username, f"transcoding {path.name} ({vcodec} preset={preset} crf={crf} {size_mb:.0f}MB, timeout={timeout_s}s)")
+    t0 = time.time()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        elapsed = time.time() - t0
+        if result.returncode != 0:
+            log(username, f"ffmpeg error after {elapsed:.0f}s: {result.stderr[-300:]}")
+            tmp.unlink(missing_ok=True)
+            return
+        orig_size = path.stat().st_size
+        new_size = tmp.stat().st_size
+        pct = 100 * (1 - new_size / orig_size) if orig_size else 0
+        tmp.rename(tc_path)
+        path.unlink()
+        log(username, f"transcode done in {elapsed:.0f}s: {path.name} -> {tc_path.name} ({orig_size//1024//1024}MB -> {new_size//1024//1024}MB, {pct:.0f}% smaller)")
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - t0
+        log(username, f"transcode timed out after {elapsed:.0f}s — leaving original")
+        tmp.unlink(missing_ok=True)
+    except Exception as e:
+        log(username, f"transcode failed: {e}")
+        tmp.unlink(missing_ok=True)
 
 
 def is_live(username: str) -> bool:
@@ -52,7 +154,10 @@ def is_live(username: str) -> bool:
     return False
 
 
-def _record_with_requests(username: str, stream_url: str, cookies_list: list, output_path: Path):
+def _record_with_requests(
+    username: str, stream_url: str, cookies_list: list, output_path: Path,
+    time_limit: int | None = None, size_limit: int | None = None,
+) -> str:
     sess = req_lib.Session()
     sess.headers.update({
         "User-Agent": _UA,
@@ -63,7 +168,27 @@ def _record_with_requests(username: str, stream_url: str, cookies_list: list, ou
 
     base = stream_url.split("?")[0].rsplit("/", 1)[0] + "/"
     seen: set[str] = set()
+    init_seen: set[str] = set()
     errors = 0
+
+    def resolve(uri: str) -> str:
+        return uri if uri.startswith("http") else base + uri
+
+    def fetch_and_write(url: str, label: str, f) -> bool:
+        try:
+            r = sess.get(url, timeout=30)
+            if r.status_code != 200:
+                log(username, f"{label} HTTP {r.status_code}")
+                return False
+            f.write(r.content)
+            f.flush()
+            return True
+        except Exception as e:
+            log(username, f"{label} error: {e}")
+            return False
+
+    start_time = time.time()
+    stop_reason = "shutdown"
 
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
@@ -76,38 +201,54 @@ def _record_with_requests(username: str, stream_url: str, cookies_list: list, ou
                 errors += 1
                 if errors >= 5:
                     log(username, f"playlist error x5, stopping: {e}")
+                    stop_reason = "error"
                     break
                 time.sleep(2)
                 continue
 
             lines = resp.text.splitlines()
+
             for i, line in enumerate(lines):
+                if line.startswith("#EXT-X-MAP"):
+                    m = re.search(r'URI="([^"]+)"', line)
+                    if m:
+                        init_url = resolve(m.group(1))
+                        if init_url not in init_seen:
+                            if fetch_and_write(init_url, "init", f):
+                                init_seen.add(init_url)
+                                log(username, "wrote init segment")
+
                 if not line.startswith("#EXTINF") or i + 1 >= len(lines):
                     continue
                 uri = lines[i + 1].strip()
                 if not uri or uri.startswith("#"):
                     continue
-                seg_url = uri if uri.startswith("http") else base + uri
+                seg_url = resolve(uri)
                 if seg_url in seen:
                     continue
                 seen.add(seg_url)
-                try:
-                    sr = sess.get(seg_url, timeout=30)
-                    sr.raise_for_status()
-                    f.write(sr.content)
-                    f.flush()
-                except Exception as e:
-                    log(username, f"segment error: {e}")
+                fetch_and_write(seg_url, "seg", f)
 
             if "#EXT-X-ENDLIST" in resp.text:
                 log(username, "stream ended")
+                stop_reason = "stream_ended"
+                break
+            if time_limit and (time.time() - start_time) >= time_limit:
+                log(username, f"time limit reached ({time_limit}s)")
+                stop_reason = "time_limit"
+                break
+            if size_limit and output_path.stat().st_size >= size_limit:
+                log(username, f"size limit reached ({size_limit} bytes)")
+                stop_reason = "size_limit"
                 break
             time.sleep(1)
 
     log(username, f"done: {output_path.name}")
+    return stop_reason
 
 
-async def _record_async(username: str):
+async def _record_async(model: dict):
+    username = model["name"]
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -175,6 +316,7 @@ async def _record_async(username: str):
         # including MOUFLON's internal requests invisible to page.on("response").
         stream_url = None
         seen_perf: set[str] = set()
+        perf_master_urls: list[str] = []
 
         for attempt in range(8):
             await asyncio.sleep(5)
@@ -200,7 +342,8 @@ async def _record_async(username: str):
 
                 # Prefer pkey-authenticated URLs (real stream, not ping/health checks)
                 pkey_urls = [u for u in perf_urls
-                             if "m3u8" in u and "pkey=" in u and "ping" not in u]
+                             if "m3u8" in u and "pkey=" in u
+                             and "ping" not in u and "master" not in u.lower()]
                 other_variants = [u for u in perf_urls
                                   if "m3u8" in u and "ping" not in u
                                   and "master" not in u.lower()]
@@ -209,8 +352,17 @@ async def _record_async(username: str):
                     stream_url = candidates[-1]
                     log(username, f"stream URL via perf: ...{stream_url[-90:]}")
                     break
+
+                for u in perf_urls:
+                    if "m3u8" in u and "master" in u.lower() and "ping" not in u and u not in perf_master_urls:
+                        perf_master_urls.append(u)
             except Exception as e:
                 log(username, f"perf query error: {e}")
+
+        # If on_response never fired but perf saw master URLs, use them for the fallback
+        if not stream_url and not master_url and perf_master_urls:
+            log(username, f"on_response missed master — using perf master: ...{perf_master_urls[-1][-80:]}")
+            master_url.extend(perf_master_urls)
 
         # Fallback: derive variant from master using context.request
         # (uses Chrome's network stack + cookies, bypasses MOUFLON JS interception)
@@ -261,32 +413,88 @@ async def _record_async(username: str):
 
         await browser.close()
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output = RECORDINGS_DIR / f"{username}_{timestamp}.ts"
+    time_limit = _parse_duration(model["recording_time_limit"]) if model.get("recording_time_limit") else None
+    size_limit = _parse_size(model["recording_file_size_limit"]) if model.get("recording_file_size_limit") else None
 
+    on_limit = model.get("on_limit_reached", "stop_for_day")
+    rollover_max = model.get("rollover_max_files")
+    cooldown_mins = model.get("cooldown_minutes") or 0
+
+    effective_time_limit = None if on_limit == "ignore" else time_limit
+    effective_size_limit = None if on_limit == "ignore" else size_limit
+
+    norm_url = _normalize_stream_url(stream_url)
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, _record_with_requests, username, _normalize_stream_url(stream_url), cookies, output
-    )
+    file_count = 0
+
+    while True:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
+
+        stop_reason = await loop.run_in_executor(
+            None, _record_with_requests, username, norm_url, cookies, output,
+            effective_time_limit, effective_size_limit,
+        )
+
+        if TRANSCODE_CFG.get("enabled"):
+            await loop.run_in_executor(None, _transcode_file, username, output, TRANSCODE_CFG)
+
+        file_count += 1
+
+        if stop_reason not in ("time_limit", "size_limit"):
+            break
+
+        if on_limit == "rollover":
+            if rollover_max and file_count >= rollover_max:
+                log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
+                resume_after[username] = _next_poll_start(model)
+                break
+            log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
+            continue
+        elif on_limit == "pause":
+            resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
+            resume_after[username] = resume_dt
+            log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
+            break
+        elif on_limit == "stop_for_day":
+            nps = _next_poll_start(model)
+            resume_after[username] = nps
+            log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
+            break
+        else:
+            break
+
     active_recordings.pop(username, None)
 
 
-def record(username: str):
+def record(model: dict):
+    username = model["name"]
     log(username, "browser launching to find stream URL...")
-    asyncio.run(_record_async(username))
+    asyncio.run(_record_async(model))
 
 
 def monitor():
-    print(f"[{time.strftime('%H:%M:%S')}] Monitoring: {MODELS}", flush=True)
+    names = [m["name"] for m in MODELS if m.get("enabled", True)]
+    print(f"[{time.strftime('%H:%M:%S')}] Monitoring: {names}", flush=True)
     while True:
-        for user in MODELS:
-            t = active_recordings.get(user)
+        for model in MODELS:
+            if not model.get("enabled", True):
+                continue
+            username = model["name"]
+            if not _in_poll_window(model):
+                log(username, "outside poll window, skipping")
+                continue
+            if username in resume_after:
+                if datetime.now() < resume_after[username]:
+                    continue
+                del resume_after[username]
+            t = active_recordings.get(username)
             if t and t.is_alive():
                 continue
-            if is_live(user):
-                t = threading.Thread(target=record, args=(user,), daemon=True)
+            if is_live(username):
+                t = threading.Thread(target=record, args=(model,), daemon=True)
                 t.start()
-                active_recordings[user] = t
+                active_recordings[username] = t
         time.sleep(POLL_INTERVAL)
 
 

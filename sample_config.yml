@@ -1,0 +1,41 @@
+models:
+  - name: "Alice Johnson"
+    enabled: true                      # set false to skip this model entirely
+    last_seen: "2026-05-18T14:23:00Z"
+    poll_start_time: "09:00:00"
+    poll_stop_time: "17:30:00"
+    recording_time_limit: "1h"
+    recording_file_size_limit: "500MB"
+    on_limit_reached: "stop_for_day"   # stop until next poll_start_time
+    rollover_max_files: null
+    cooldown_minutes: null
+
+  - name: "Bob Smith"
+    enabled: true
+    last_seen: "2026-05-18T09:15:22Z"
+    poll_start_time: "08:30:00"
+    poll_stop_time: "16:00:00"
+    recording_time_limit: "30m"
+    recording_file_size_limit: "250MB"
+    on_limit_reached: "rollover"       # start new file, up to rollover_max_files
+    rollover_max_files: 5
+    cooldown_minutes: null
+
+  - name: "Carol Davis"
+    enabled: true
+    last_seen: "2026-05-17T22:10:05Z"
+    poll_start_time: "10:00:00"
+    poll_stop_time: "18:45:00"
+    recording_time_limit: "2h"
+    recording_file_size_limit: "1GB"
+    on_limit_reached: "pause"          # stop, resume after cooldown_minutes
+    rollover_max_files: null
+    cooldown_minutes: 15
+
+  # on_limit_reached options (triggers on whichever limit hits first — time or size):
+  #   stop_for_day  - no more recordings until next poll_start_time
+  #   rollover      - start new file; stop after rollover_max_files files
+  #   pause         - wait cooldown_minutes then allow resume
+  #   ignore        - continue past both limits
+
+# Transcoding is configured via environment variables in .env — see TRANSCODE_* settings there.
