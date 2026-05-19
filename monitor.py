@@ -191,7 +191,6 @@ def _record_with_requests(
     stop_reason = "shutdown"
     seg_count = 0
     empty_polls = 0
-    first_playlist_logged = False
 
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
@@ -220,10 +219,8 @@ def _record_with_requests(
                 continue
 
             lines = resp.text.splitlines()
-            if not first_playlist_logged:
-                first_playlist_logged = True
-                log(username, f"first playlist ({len(lines)} lines): {resp.text[:600]!r}")
             new_segs = 0
+            pending_mouflon_uri: str | None = None
 
             for i, line in enumerate(lines):
                 if line.startswith("#EXT-X-MAP"):
@@ -234,8 +231,30 @@ def _record_with_requests(
                             if fetch_and_write(init_url, "init", f):
                                 init_seen.add(init_url)
                                 log(username, "wrote init segment")
+                    pending_mouflon_uri = None
+                    continue
+
+                # MOUFLON: real segment URL precedes the fake #EXT-X-PART URI
+                if line.startswith("#EXT-X-MOUFLON:URI:"):
+                    pending_mouflon_uri = line[len("#EXT-X-MOUFLON:URI:"):].strip()
+                    continue
+
+                if line.startswith("#EXT-X-PART:"):
+                    seg_url = pending_mouflon_uri
+                    pending_mouflon_uri = None
+                    if not seg_url:
+                        m = re.search(r'URI="([^"]+)"', line)
+                        seg_url = resolve(m.group(1)) if m else None
+                    if seg_url and seg_url not in seen:
+                        seen.add(seg_url)
+                        ok = fetch_and_write(seg_url, "part", f)
+                        if ok:
+                            new_segs += 1
+                            seg_count += 1
+                    continue
 
                 if not line.startswith("#EXTINF") or i + 1 >= len(lines):
+                    pending_mouflon_uri = None
                     continue
                 uri = lines[i + 1].strip()
                 if not uri or uri.startswith("#"):
