@@ -191,6 +191,7 @@ def _record_with_requests(
     stop_reason = "shutdown"
     seg_count = 0
     empty_polls = 0
+    first_playlist_logged = False
 
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
@@ -219,6 +220,9 @@ def _record_with_requests(
                 continue
 
             lines = resp.text.splitlines()
+            if not first_playlist_logged:
+                first_playlist_logged = True
+                log(username, f"first playlist ({len(lines)} lines): {resp.text[:600]!r}")
             new_segs = 0
 
             for i, line in enumerate(lines):
