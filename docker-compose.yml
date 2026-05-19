@@ -1,5 +1,5 @@
 services:
-  cam-recorder:
+  app:
     build: .
     container_name: ${CONTAINER_NAME:-STREAMER1}
     env_file:

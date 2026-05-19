@@ -46,6 +46,7 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 active_recordings = {}
 resume_after: dict[str, datetime] = {}
 shutdown = threading.Event()
+_browser_sem = threading.Semaphore(3)  # max concurrent browser instances
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -347,6 +348,20 @@ def _record_with_requests(
 
 async def _record_async(model: dict):
     username = model["name"]
+
+    time_limit = _parse_duration(model["recording_time_limit"]) if model.get("recording_time_limit") else None
+    size_limit = _parse_size(model["recording_file_size_limit"]) if model.get("recording_file_size_limit") else None
+    on_limit = model.get("on_limit_reached", "stop_for_day")
+    rollover_max = model.get("rollover_max_files")
+    cooldown_mins = model.get("cooldown_minutes") or 0
+    effective_time_limit = None if on_limit == "ignore" else time_limit
+    effective_size_limit = None if on_limit == "ignore" else size_limit
+    loop = asyncio.get_event_loop()
+
+    # Collects (url, bytes) for MOUFLON init+part MP4s as browser downloads them.
+    # Populated by on_response before we even know if stream is LLHLS.
+    media_queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -356,9 +371,16 @@ async def _record_async(model: dict):
                 "--disable-setuid-sandbox",
                 "--no-zygote",
                 "--disable-gpu",
+                "--disable-gpu-sandbox",
+                "--single-process",
                 "--mute-audio",
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-background-networking",
+                "--disable-extensions",
+                "--disable-translate",
+                "--disable-sync",
+                "--metrics-recording-only",
             ],
         )
         context = await browser.new_context(
@@ -372,7 +394,6 @@ async def _record_async(model: dict):
         """)
         page = await context.new_page()
 
-        # Reduce memory: block images and fonts
         await page.route(
             "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}",
             lambda route: route.abort(),
@@ -382,15 +403,24 @@ async def _record_async(model: dict):
 
         async def on_response(response):
             url = response.url
-            if "m3u8" not in url or master_url:
+            # Master playlist detection
+            if "m3u8" in url and not master_url:
+                try:
+                    body = await response.text()
+                    if "#EXT-X-STREAM-INF" in body:
+                        log(username, f"master: ...{url[-80:]}")
+                        master_url.append(url)
+                except Exception:
+                    pass
                 return
-            try:
-                body = await response.text()
-            except Exception:
-                return
-            if "#EXT-X-STREAM-INF" in body:
-                log(username, f"master: ...{url[-80:]}")
-                master_url.append(url)
+            # MOUFLON segment capture: browser fetches real part/init URLs;
+            # capture bytes here so we never need to re-download from CDN
+            if ".mp4" in url and ("_init_" in url or "_part" in url):
+                try:
+                    body = await response.body()
+                    media_queue.put_nowait((url, body))
+                except Exception:
+                    pass
 
         page.on("response", on_response)
 
@@ -409,16 +439,12 @@ async def _record_async(model: dict):
         except Exception:
             pass
 
-        # Poll performance API every 5s for up to 40s.
-        # performance.getEntriesByType('resource') captures all XHR/fetch URLs
-        # including MOUFLON's internal requests invisible to page.on("response").
         stream_url = None
         seen_perf: set[str] = set()
         perf_master_urls: list[str] = []
 
         for attempt in range(8):
             await asyncio.sleep(5)
-
             try:
                 await page.evaluate(
                     "document.querySelectorAll('video').forEach("
@@ -427,7 +453,6 @@ async def _record_async(model: dict):
                 )
             except Exception:
                 pass
-
             try:
                 perf_urls: list[str] = await page.evaluate(
                     "performance.getEntriesByType('resource').map(e => e.name)"
@@ -437,8 +462,6 @@ async def _record_async(model: dict):
                         seen_perf.add(url)
                         if "m3u8" in url:
                             log(username, f"perf[{attempt}]: ...{url[-90:]}")
-
-                # Prefer pkey-authenticated URLs (real stream, not ping/health checks)
                 pkey_urls = [u for u in perf_urls
                              if "m3u8" in u and "pkey=" in u
                              and "ping" not in u and "master" not in u.lower()]
@@ -450,20 +473,16 @@ async def _record_async(model: dict):
                     stream_url = candidates[-1]
                     log(username, f"stream URL via perf: ...{stream_url[-90:]}")
                     break
-
                 for u in perf_urls:
                     if "m3u8" in u and "master" in u.lower() and "ping" not in u and u not in perf_master_urls:
                         perf_master_urls.append(u)
             except Exception as e:
                 log(username, f"perf query error: {e}")
 
-        # If on_response never fired but perf saw master URLs, use them for the fallback
         if not stream_url and not master_url and perf_master_urls:
             log(username, f"on_response missed master — using perf master: ...{perf_master_urls[-1][-80:]}")
             master_url.extend(perf_master_urls)
 
-        # Fallback: derive variant from master using context.request
-        # (uses Chrome's network stack + cookies, bypasses MOUFLON JS interception)
         if not stream_url and master_url:
             log(username, "perf found no variant — trying context.request fallback")
             try:
@@ -503,27 +522,154 @@ async def _record_async(model: dict):
             active_recordings.pop(username, None)
             return
 
-        cookies = []
-        try:
-            cookies = await context.cookies()
-        except Exception:
-            pass
+        is_llhls = "_HLS_msn=" in stream_url
 
-        await browser.close()
+        if not is_llhls:
+            # Non-LLHLS: close browser, use requests-based downloader
+            cookies = []
+            try:
+                cookies = await context.cookies()
+            except Exception:
+                pass
+            await browser.close()
+        else:
+            # LLHLS: browser already has content via on_response capture.
+            # Keep browser alive so MOUFLON keeps streaming; record from media_queue.
+            log(username, "LLHLS: recording via browser capture")
 
-    time_limit = _parse_duration(model["recording_time_limit"]) if model.get("recording_time_limit") else None
-    size_limit = _parse_size(model["recording_file_size_limit"]) if model.get("recording_file_size_limit") else None
+            # Drain queue for init segment and any early parts already buffered
+            init_data: bytes | None = None
+            early_parts: list[tuple[str, bytes]] = []
+            while True:
+                try:
+                    url, body = media_queue.get_nowait()
+                    if "_init_" in url and init_data is None:
+                        init_data = body
+                        log(username, f"init segment captured ({len(body)}B)")
+                    elif "_part" in url:
+                        early_parts.append((url, body))
+                except asyncio.QueueEmpty:
+                    break
 
-    on_limit = model.get("on_limit_reached", "stop_for_day")
-    rollover_max = model.get("rollover_max_files")
-    cooldown_mins = model.get("cooldown_minutes") or 0
+            # If init not yet captured, wait for it
+            if init_data is None:
+                log(username, "waiting for init segment...")
+                deadline = loop.time() + 30
+                while loop.time() < deadline and not shutdown.is_set():
+                    try:
+                        url, body = await asyncio.wait_for(media_queue.get(), timeout=2.0)
+                        if "_init_" in url:
+                            init_data = body
+                            log(username, f"init segment captured ({len(body)}B)")
+                            break
+                        elif "_part" in url:
+                            early_parts.append((url, body))
+                    except asyncio.TimeoutError:
+                        pass
 
-    effective_time_limit = None if on_limit == "ignore" else time_limit
-    effective_size_limit = None if on_limit == "ignore" else size_limit
+            if init_data is None:
+                log(username, "could not capture init segment, aborting")
+                await browser.close()
+                active_recordings.pop(username, None)
+                return
 
-    loop = asyncio.get_event_loop()
+            # Keep video playing for long recordings
+            async def keep_playing():
+                while not shutdown.is_set():
+                    try:
+                        await page.evaluate(
+                            "document.querySelectorAll('video').forEach(v => v.play().catch(() => {}))"
+                        )
+                    except Exception:
+                        return
+                    await asyncio.sleep(15)
+
+            keep_task = asyncio.create_task(keep_playing())
+
+            file_count = 0
+            seen_parts: set[str] = set()
+
+            try:
+                while True:  # rollover loop
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
+                    log(username, f"recording -> {output.name}")
+                    seg_count = 0
+                    file_start = time.time()
+                    stop_reason = "shutdown"
+
+                    with open(output, "wb") as f:
+                        f.write(init_data)
+                        f.flush()
+
+                        for url, body in early_parts:
+                            if url not in seen_parts:
+                                seen_parts.add(url)
+                                f.write(body)
+                                seg_count += 1
+                        if early_parts:
+                            f.flush()
+                            early_parts = []
+
+                        while not shutdown.is_set():
+                            try:
+                                url, body = await asyncio.wait_for(media_queue.get(), timeout=30.0)
+                            except asyncio.TimeoutError:
+                                log(username, "no new parts for 30s, stream may have ended")
+                                stop_reason = "stream_ended"
+                                break
+                            if url not in seen_parts:
+                                seen_parts.add(url)
+                                f.write(body)
+                                f.flush()
+                                seg_count += 1
+                                if seg_count % 20 == 0:
+                                    log(username, f"segs: {seg_count}, file: {output.stat().st_size}B")
+                            if effective_time_limit and (time.time() - file_start) >= effective_time_limit:
+                                log(username, f"time limit reached ({effective_time_limit}s)")
+                                stop_reason = "time_limit"
+                                break
+                            if effective_size_limit and output.stat().st_size >= effective_size_limit:
+                                log(username, f"size limit reached ({effective_size_limit}B)")
+                                stop_reason = "size_limit"
+                                break
+
+                    log(username, f"done: {output.name}")
+
+                    if TRANSCODE_CFG.get("enabled"):
+                        await loop.run_in_executor(None, _transcode_file, username, output, TRANSCODE_CFG)
+
+                    file_count += 1
+                    if stop_reason not in ("time_limit", "size_limit"):
+                        break
+                    if on_limit == "rollover":
+                        if rollover_max and file_count >= rollover_max:
+                            log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
+                            resume_after[username] = _next_poll_start(model)
+                            break
+                        log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
+                        continue
+                    elif on_limit == "pause":
+                        resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
+                        resume_after[username] = resume_dt
+                        log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
+                        break
+                    elif on_limit == "stop_for_day":
+                        nps = _next_poll_start(model)
+                        resume_after[username] = nps
+                        log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
+                        break
+                    else:
+                        break
+            finally:
+                keep_task.cancel()
+                await browser.close()
+
+            active_recordings.pop(username, None)
+            return
+
+    # Non-LLHLS path: requests-based downloader
     file_count = 0
-
     while True:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
@@ -537,10 +683,8 @@ async def _record_async(model: dict):
             await loop.run_in_executor(None, _transcode_file, username, output, TRANSCODE_CFG)
 
         file_count += 1
-
         if stop_reason not in ("time_limit", "size_limit"):
             break
-
         if on_limit == "rollover":
             if rollover_max and file_count >= rollover_max:
                 log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
@@ -566,8 +710,15 @@ async def _record_async(model: dict):
 
 def record(model: dict):
     username = model["name"]
-    log(username, "browser launching to find stream URL...")
-    asyncio.run(_record_async(model))
+    if not _browser_sem.acquire(blocking=False):
+        log(username, "max concurrent browsers reached, will retry next poll")
+        active_recordings.pop(username, None)
+        return
+    try:
+        log(username, "browser launching to find stream URL...")
+        asyncio.run(_record_async(model))
+    finally:
+        _browser_sem.release()
 
 
 def monitor():
