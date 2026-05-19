@@ -19,6 +19,16 @@ def _load_config(path: str = "config.yml") -> dict:
 
 _CONFIG = _load_config()
 MODELS = _CONFIG["models"]
+
+_MOUFLON_MSN_RE = re.compile(r'/\d+_(\d+)_[A-Za-z0-9]+/')
+_MOUFLON_PART_RE = re.compile(r'_part(\d+)\.mp4')
+
+def _mouflon_msn_part(url: str) -> tuple[int | None, int | None]:
+    msn_m = _MOUFLON_MSN_RE.search(url)
+    part_m = _MOUFLON_PART_RE.search(url)
+    if msn_m and part_m:
+        return int(msn_m.group(1)), int(part_m.group(1))
+    return None, None
 TRANSCODE_CFG: dict = {
     "enabled":       os.environ.get("TRANSCODE_ENABLED", "").lower() in ("1", "true", "yes"),
     "codec":         os.environ.get("TRANSCODE_CODEC", "h264"),
@@ -166,7 +176,22 @@ def _record_with_requests(
     if cookies_list:
         sess.headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies_list)
 
-    base = stream_url.split("?")[0].rsplit("/", 1)[0] + "/"
+    # LLHLS blocking mode: _HLS_msn/_HLS_part captured from browser at live edge.
+    # MOUFLON part URLs expire in ~1-2s, so non-blocking polling always gets 404s.
+    # Blocking requests make the server hold until the requested part is fresh.
+    msn_m = re.search(r'[?&]_HLS_msn=(\d+)', stream_url)
+    part_m = re.search(r'[?&]_HLS_part=(\d+)', stream_url)
+    llhls = bool(msn_m and part_m)
+
+    if llhls:
+        next_msn = int(msn_m.group(1))
+        next_part = int(part_m.group(1))
+        base_url = _normalize_stream_url(stream_url)
+        log(username, f"LLHLS blocking mode, starting msn={next_msn} part={next_part}")
+    else:
+        base_url = stream_url
+
+    base = base_url.split("?")[0].rsplit("/", 1)[0] + "/"
     seen: set[str] = set()
     init_seen: set[str] = set()
     errors = 0
@@ -195,8 +220,20 @@ def _record_with_requests(
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
         while not shutdown.is_set():
+            if llhls:
+                poll_url = f"{base_url}&_HLS_msn={next_msn}&_HLS_part={next_part}"
+                poll_timeout = 35
+            else:
+                poll_url = base_url
+                poll_timeout = 15
+
             try:
-                resp = sess.get(stream_url, timeout=15)
+                resp = sess.get(poll_url, timeout=poll_timeout)
+                if llhls and resp.status_code in (400, 410):
+                    log(username, f"LLHLS msn={next_msn} part={next_part} out of range ({resp.status_code}), advancing segment")
+                    next_msn += 1
+                    next_part = 0
+                    continue
                 resp.raise_for_status()
                 errors = 0
             except Exception as e:
@@ -210,7 +247,7 @@ def _record_with_requests(
 
             if "#EXTM3U" not in resp.text:
                 errors += 1
-                log(username, f"playlist response not M3U8 (HTTP {resp.status_code}, {len(resp.content)}B): {resp.text[:120]!r}")
+                log(username, f"playlist not M3U8 (HTTP {resp.status_code}, {len(resp.content)}B): {resp.text[:120]!r}")
                 if errors >= 5:
                     log(username, "playlist invalid x5, stopping")
                     stop_reason = "error"
@@ -221,6 +258,8 @@ def _record_with_requests(
             lines = resp.text.splitlines()
             new_segs = 0
             pending_mouflon_uri: str | None = None
+            max_seen_msn: int | None = None
+            max_seen_part: int | None = None
 
             for i, line in enumerate(lines):
                 if line.startswith("#EXT-X-MAP"):
@@ -234,7 +273,6 @@ def _record_with_requests(
                     pending_mouflon_uri = None
                     continue
 
-                # MOUFLON: real segment URL precedes the fake #EXT-X-PART URI
                 if line.startswith("#EXT-X-MOUFLON:URI:"):
                     pending_mouflon_uri = line[len("#EXT-X-MOUFLON:URI:"):].strip()
                     continue
@@ -245,12 +283,20 @@ def _record_with_requests(
                     if not seg_url:
                         m = re.search(r'URI="([^"]+)"', line)
                         seg_url = resolve(m.group(1)) if m else None
-                    if seg_url and seg_url not in seen:
-                        seen.add(seg_url)
-                        ok = fetch_and_write(seg_url, "part", f)
-                        if ok:
-                            new_segs += 1
-                            seg_count += 1
+                    if seg_url:
+                        url_msn, url_part = _mouflon_msn_part(seg_url) if llhls else (None, None)
+                        if llhls and url_msn is not None:
+                            if max_seen_msn is None or (url_msn, url_part) > (max_seen_msn, max_seen_part):
+                                max_seen_msn, max_seen_part = url_msn, url_part
+                            if (url_msn, url_part) < (next_msn, next_part):
+                                seen.add(seg_url)
+                                continue
+                        if seg_url not in seen:
+                            seen.add(seg_url)
+                            ok = fetch_and_write(seg_url, "part", f)
+                            if ok:
+                                new_segs += 1
+                                seg_count += 1
                     continue
 
                 if not line.startswith("#EXTINF") or i + 1 >= len(lines):
@@ -260,13 +306,16 @@ def _record_with_requests(
                 if not uri or uri.startswith("#"):
                     continue
                 seg_url = resolve(uri)
-                if seg_url in seen:
-                    continue
-                seen.add(seg_url)
-                ok = fetch_and_write(seg_url, "seg", f)
-                if ok:
-                    new_segs += 1
-                    seg_count += 1
+                if seg_url not in seen:
+                    seen.add(seg_url)
+                    ok = fetch_and_write(seg_url, "seg", f)
+                    if ok:
+                        new_segs += 1
+                        seg_count += 1
+
+            if llhls and max_seen_msn is not None:
+                next_msn = max_seen_msn
+                next_part = max_seen_part + 1
 
             if new_segs == 0:
                 empty_polls += 1
@@ -289,7 +338,8 @@ def _record_with_requests(
                 log(username, f"size limit reached ({size_limit} bytes)")
                 stop_reason = "size_limit"
                 break
-            time.sleep(1)
+            if not llhls:
+                time.sleep(1)
 
     log(username, f"done: {output_path.name}")
     return stop_reason
@@ -471,7 +521,6 @@ async def _record_async(model: dict):
     effective_time_limit = None if on_limit == "ignore" else time_limit
     effective_size_limit = None if on_limit == "ignore" else size_limit
 
-    norm_url = _normalize_stream_url(stream_url)
     loop = asyncio.get_event_loop()
     file_count = 0
 
@@ -480,7 +529,7 @@ async def _record_async(model: dict):
         output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
 
         stop_reason = await loop.run_in_executor(
-            None, _record_with_requests, username, norm_url, cookies, output,
+            None, _record_with_requests, username, stream_url, cookies, output,
             effective_time_limit, effective_size_limit,
         )
 
