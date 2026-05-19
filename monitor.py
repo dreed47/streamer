@@ -189,6 +189,8 @@ def _record_with_requests(
 
     start_time = time.time()
     stop_reason = "shutdown"
+    seg_count = 0
+    empty_polls = 0
 
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
@@ -206,7 +208,18 @@ def _record_with_requests(
                 time.sleep(2)
                 continue
 
+            if "#EXTM3U" not in resp.text:
+                errors += 1
+                log(username, f"playlist response not M3U8 (HTTP {resp.status_code}, {len(resp.content)}B): {resp.text[:120]!r}")
+                if errors >= 5:
+                    log(username, "playlist invalid x5, stopping")
+                    stop_reason = "error"
+                    break
+                time.sleep(2)
+                continue
+
             lines = resp.text.splitlines()
+            new_segs = 0
 
             for i, line in enumerate(lines):
                 if line.startswith("#EXT-X-MAP"):
@@ -227,7 +240,19 @@ def _record_with_requests(
                 if seg_url in seen:
                     continue
                 seen.add(seg_url)
-                fetch_and_write(seg_url, "seg", f)
+                ok = fetch_and_write(seg_url, "seg", f)
+                if ok:
+                    new_segs += 1
+                    seg_count += 1
+
+            if new_segs == 0:
+                empty_polls += 1
+                if empty_polls % 10 == 0:
+                    log(username, f"no new segments for {empty_polls} polls (total segs: {seg_count}, file: {output_path.stat().st_size}B)")
+            else:
+                empty_polls = 0
+                if seg_count % 20 == 0:
+                    log(username, f"segs: {seg_count}, file: {output_path.stat().st_size}B")
 
             if "#EXT-X-ENDLIST" in resp.text:
                 log(username, "stream ended")
