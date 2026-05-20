@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import monitor as _monitor
+import state as _state
 
 _RECORDING_RE = re.compile(r'^(.+)_(\d{8}_\d{6})(?:_tc)?\.mp4$')
 
@@ -29,17 +30,17 @@ def _save_cfg(config: dict):
 
 def _model_status(name: str, model: dict) -> tuple[str, str, str]:
     """Returns (dot_class, display_label, badge_class)."""
-    t = _monitor.active_recordings.get(name)
+    t = _state.active_recordings.get(name)
     if t and t.is_alive():
         return "recording", "Recording", "badge-warning"
-    if name in _monitor.resume_after:
-        dt = _monitor.resume_after[name]
+    if name in _state.resume_after:
+        dt = _state.resume_after[name]
         return "cooldown", f"Cooldown · {dt.strftime('%H:%M')}", "badge-warning"
     if not model.get("enabled", True):
         return "idle", "Disabled", "badge-neutral"
     if not _monitor._in_poll_window(model):
         return "idle", "Outside window", "badge-neutral"
-    reason = _monitor.idle_reason.get(name, "")
+    reason = _state.idle_reason.get(name, "")
     if reason == "offline":
         return "idle", "Offline", "badge-danger"
     if reason == "max_concurrent":
@@ -67,7 +68,7 @@ async def root():
 
 @app.get("/models", response_class=HTMLResponse)
 async def models_list(request: Request, success: str = "", error: str = ""):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
     model_list = config.get("models", [])
     video_counts = _video_counts()
@@ -106,7 +107,7 @@ async def model_create(
     rollover_max_files: str = Form(""),
     cooldown_minutes: str = Form(""),
 ):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
         existing = [m["name"] for m in config.get("models", [])]
         if name in existing:
@@ -133,7 +134,7 @@ async def model_create(
 
 @app.get("/models/{name}", response_class=HTMLResponse)
 async def model_edit_form(request: Request, name: str, success: str = "", error: str = ""):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
     model = next((m for m in config.get("models", []) if m["name"] == name), None)
     if not model:
@@ -158,7 +159,7 @@ async def model_update(
     rollover_max_files: str = Form(""),
     cooldown_minutes: str = Form(""),
 ):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
         model = next((m for m in config.get("models", []) if m["name"] == name), None)
         if not model:
@@ -177,7 +178,7 @@ async def model_update(
 
 @app.post("/models/{name}/delete")
 async def model_delete(name: str):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
         config["models"] = [m for m in config.get("models", []) if m["name"] != name]
         _save_cfg(config)
@@ -186,7 +187,7 @@ async def model_delete(name: str):
 
 @app.post("/models/{name}/toggle")
 async def model_toggle(name: str):
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
         for m in config.get("models", []):
             if m["name"] == name:
@@ -198,15 +199,15 @@ async def model_toggle(name: str):
 
 @app.get("/api/status")
 async def api_status():
-    with _monitor.config_lock:
+    with _state.config_lock:
         config = _load_cfg()
     model_list = config.get("models", [])
     statuses = {}
     for m in model_list:
         status, label, badge = _model_status(m["name"], m)
         statuses[m["name"]] = {"status": status, "label": label, "badge": badge}
-    recording = [n for n, t in _monitor.active_recordings.items() if t.is_alive()]
-    cooldowns = {n: dt.isoformat() for n, dt in _monitor.resume_after.items()}
+    recording = [n for n, t in _state.active_recordings.items() if t.is_alive()]
+    cooldowns = {n: dt.isoformat() for n, dt in _state.resume_after.items()}
     return {"recording": recording, "cooldowns": cooldowns, "statuses": statuses}
 
 

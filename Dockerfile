@@ -10,6 +10,7 @@ RUN playwright install chromium --with-deps
 
 COPY entrypoint.sh /entrypoint.sh
 
+COPY state.py .
 COPY monitor.py .
 COPY web.py .
 COPY templates/ ./templates/

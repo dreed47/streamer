@@ -43,11 +43,7 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 # ===============================================
 
-active_recordings = {}
-resume_after: dict[str, datetime] = {}
-idle_reason: dict[str, str] = {}
-shutdown = threading.Event()
-config_lock = threading.Lock()
+from state import active_recordings, resume_after, idle_reason, shutdown, config_lock
 _browser_sem = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "3")))
 
 _UA = (
