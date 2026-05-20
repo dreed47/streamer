@@ -8,17 +8,23 @@
     <h1>Recordings</h1>
     <p>{{ files|length }} video{% if files|length != 1 %}s{% endif %}{% if filter_model %} for {{ filter_model }}{% endif %}</p>
   </div>
-  {% if filter_model %}
-  <a href="/recordings" class="btn btn-outline btn-sm">Show All</a>
-  {% endif %}
+  <div class="flex-center gap-8">
+    {% if filter_model %}
+    <a href="/recordings" class="btn btn-outline btn-sm">Show All</a>
+    {% endif %}
+    {% if files %}
+    <button id="select-all-btn" class="btn btn-outline btn-sm" onclick="toggleSelectAll()">Select All</button>
+    {% endif %}
+  </div>
 </div>
 
 {% if success %}<div class="flash flash-success">✓ {{ success }}</div>{% endif %}
 {% if error %}<div class="flash flash-error">✗ {{ error }}</div>{% endif %}
 
 {% if files %}
+  <form id="bulk-form" method="POST" action="/recordings/bulk-delete">
   {% for model_name, model_files in models_grouped.items() %}
-  <div class="card" style="padding: 0; overflow: hidden;">
+  <div class="card" style="padding: 0; overflow: hidden; margin-bottom: 16px;">
     <div style="padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--bg);">
       <div class="flex-between">
         <span style="font-weight: 700; font-size: 15px;">{{ model_name }}</span>
@@ -34,7 +40,10 @@
     {% set stem = f.filename[:-4] %}
     <div style="padding: 16px 20px; border-bottom: 1px solid var(--border);">
       <div class="flex-between mb-8">
-        <div>
+        <div class="flex-center gap-8">
+          <input type="checkbox" name="filenames" value="{{ f.filename }}"
+                 class="rec-checkbox" onchange="updateBulkBar()"
+                 style="width:16px; height:16px; cursor:pointer; flex-shrink:0;">
           <span class="text-sm" style="font-family: monospace; color: var(--text-muted);">{{ f.filename }}</span>
         </div>
         <div class="flex-center gap-8">
@@ -42,12 +51,10 @@
           {% if f.recorded_at %}
           <span class="text-sm text-muted">{{ f.recorded_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% endif %}
-          <button class="btn btn-outline btn-sm"
+          <button type="button" class="btn btn-outline btn-sm"
                   onclick="togglePlayer('player-{{ stem }}', '/recordings/{{ f.filename }}', this)">▶ Play</button>
-          <form method="POST" action="/recordings/{{ f.filename }}/delete" style="display:inline;"
-                onsubmit="return confirm('Delete {{ f.filename }}? Cannot be undone.')">
-            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-          </form>
+          <button type="button" class="btn btn-danger btn-sm"
+                  onclick="deleteSingle('{{ f.filename }}')">Delete</button>
         </div>
       </div>
       <div id="player-{{ stem }}" style="display:none; margin-top: 10px;">
@@ -57,6 +64,7 @@
     {% endfor %}
   </div>
   {% endfor %}
+  </form>
 
 {% else %}
 <div class="card">
@@ -71,15 +79,29 @@
 </div>
 {% endif %}
 
+<!-- Bulk action bar -->
+<div id="bulk-bar" style="display:none; position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+     background:var(--card-bg,#1e1e1e); border:1px solid var(--border); border-radius:8px;
+     padding:12px 20px; box-shadow:0 4px 20px rgba(0,0,0,0.4); z-index:1000;">
+  <div class="flex-center gap-12">
+    <span id="bulk-count" class="text-sm" style="font-weight:600;"></span>
+    <button type="button" class="btn btn-outline btn-sm" onclick="clearSelection()">Cancel</button>
+    <button type="button" class="btn btn-danger btn-sm" onclick="confirmBulkDelete()">Delete Selected</button>
+  </div>
+</div>
+
+<!-- Hidden single-delete form -->
+<form id="single-delete-form" method="POST" style="display:none;">
+  <input type="hidden" name="filenames" id="single-delete-filename">
+</form>
+
 <script>
 function togglePlayer(id, src, btn) {
   var el = document.getElementById(id);
   if (!el) return;
   var video = el.querySelector('video');
   if (el.style.display === 'none') {
-    if (video && !video.src) {
-      video.src = src;
-    }
+    if (video && !video.src) video.src = src;
     el.style.display = 'block';
     btn.textContent = '■ Close';
     if (video) video.play().catch(function() {});
@@ -88,6 +110,52 @@ function togglePlayer(id, src, btn) {
     btn.textContent = '▶ Play';
     if (video) { video.pause(); video.currentTime = 0; }
   }
+}
+
+function getChecked() {
+  return Array.from(document.querySelectorAll('.rec-checkbox:checked'));
+}
+
+function updateBulkBar() {
+  var checked = getChecked();
+  var bar = document.getElementById('bulk-bar');
+  var countEl = document.getElementById('bulk-count');
+  if (checked.length > 0) {
+    countEl.textContent = checked.length + ' selected';
+    bar.style.display = 'block';
+  } else {
+    bar.style.display = 'none';
+  }
+  var allBoxes = document.querySelectorAll('.rec-checkbox');
+  var btn = document.getElementById('select-all-btn');
+  if (btn) btn.textContent = checked.length === allBoxes.length ? 'Deselect All' : 'Select All';
+}
+
+function clearSelection() {
+  document.querySelectorAll('.rec-checkbox').forEach(function(cb) { cb.checked = false; });
+  updateBulkBar();
+}
+
+function toggleSelectAll() {
+  var allBoxes = document.querySelectorAll('.rec-checkbox');
+  var checked = getChecked();
+  var selectAll = checked.length < allBoxes.length;
+  allBoxes.forEach(function(cb) { cb.checked = selectAll; });
+  updateBulkBar();
+}
+
+function confirmBulkDelete() {
+  var checked = getChecked();
+  if (!checked.length) return;
+  if (!confirm('Delete ' + checked.length + ' recording' + (checked.length !== 1 ? 's' : '') + '? Cannot be undone.')) return;
+  document.getElementById('bulk-form').submit();
+}
+
+function deleteSingle(filename) {
+  if (!confirm('Delete ' + filename + '? Cannot be undone.')) return;
+  var form = document.getElementById('single-delete-form');
+  form.action = '/recordings/' + encodeURIComponent(filename) + '/delete';
+  form.submit();
 }
 </script>
 {% endblock %}

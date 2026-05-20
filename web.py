@@ -277,3 +277,21 @@ async def recording_delete(filename: str):
     if model:
         redirect += f"&model={model}"
     return RedirectResponse(url=redirect, status_code=303)
+
+
+@app.post("/recordings/bulk-delete")
+async def recording_bulk_delete(request: Request):
+    form = await request.form()
+    filenames = form.getlist("filenames")
+    deleted, skipped = 0, 0
+    for filename in filenames:
+        path = _monitor.RECORDINGS_DIR / filename
+        if path.exists() and path.suffix == ".mp4" and path.name == filename:
+            path.unlink()
+            deleted += 1
+        else:
+            skipped += 1
+    if deleted:
+        msg = f"{deleted}+file{'s' if deleted != 1 else ''}+deleted"
+        return RedirectResponse(url=f"/recordings?success={msg}", status_code=303)
+    return RedirectResponse(url="/recordings?error=No+files+deleted", status_code=303)
