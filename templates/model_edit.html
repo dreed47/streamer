@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% set active_page = "models" %}
+{% set page_title = model.name if model else "Add Model" %}
+
+{% block content %}
+<div class="page-header flex-between">
+  <div>
+    <h1>{% if is_new %}Add Model{% else %}{{ model.name }}{% endif %}</h1>
+    {% if not is_new and model.last_seen %}
+      <p>Last seen: {{ model.last_seen[:10] }}</p>
+    {% elif not is_new %}
+      <p class="text-muted">Never seen online</p>
+    {% endif %}
+  </div>
+  <a href="/models" class="btn btn-outline">← Back</a>
+</div>
+
+{% if success %}<div class="flash flash-success">✓ {{ success }}</div>{% endif %}
+{% if error %}<div class="flash flash-error">✗ {{ error }}</div>{% endif %}
+
+<form method="POST" action="{% if is_new %}/models/new{% else %}/models/{{ model.name }}{% endif %}">
+
+  <div class="card">
+    <div class="card-title">Basic Settings</div>
+
+    {% if is_new %}
+    <div class="form-group">
+      <label class="form-label">Model Name</label>
+      <input type="text" name="name" class="form-input" required
+             placeholder="e.g. ModelName123" autocomplete="off" />
+      <div class="form-help">Must match the exact username on Stripchat</div>
+    </div>
+    {% else %}
+    <div class="form-group">
+      <label class="form-label">Model Name</label>
+      <div class="mono-box">{{ model.name }}</div>
+    </div>
+    {% endif %}
+
+    <div class="form-group">
+      <label class="form-checkbox">
+        <input type="checkbox" name="enabled" value="on"
+               {% if (model and model.enabled) or is_new %}checked{% endif %} />
+        <span style="font-size: 13px; font-weight: 600; color: var(--text);">Enabled</span>
+      </label>
+      <div class="form-help" style="margin-top: 4px;">Uncheck to pause monitoring without deleting</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Poll Start Time</label>
+        <input type="text" name="poll_start_time" class="form-input" required
+               value="{{ model.poll_start_time if model else '08:00:00' }}"
+               placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}" />
+        <div class="form-help">24h format, e.g. 09:00:00</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Poll Stop Time</label>
+        <input type="text" name="poll_stop_time" class="form-input" required
+               value="{{ model.poll_stop_time if model else '23:00:00' }}"
+               placeholder="HH:MM:SS" pattern="\d{2}:\d{2}:\d{2}" />
+        <div class="form-help">24h format, e.g. 23:30:00</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Recording Limits</div>
+
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Time Limit</label>
+        <input type="text" name="recording_time_limit" class="form-input"
+               value="{{ model.recording_time_limit if model and model.recording_time_limit else '' }}"
+               placeholder="e.g. 30m, 2h, 1h30m" />
+        <div class="form-help">Leave blank for no limit</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">File Size Limit</label>
+        <input type="text" name="recording_file_size_limit" class="form-input"
+               value="{{ model.recording_file_size_limit if model and model.recording_file_size_limit else '' }}"
+               placeholder="e.g. 250MB, 1GB" />
+        <div class="form-help">Leave blank for no limit</div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">On Limit Reached</label>
+      <select name="on_limit_reached" class="form-select" id="onLimitSelect" onchange="updateAdvanced()">
+        <option value="stop_for_day"
+          {% if not model or model.on_limit_reached == 'stop_for_day' %}selected{% endif %}>
+          Stop for day
+        </option>
+        <option value="rollover"
+          {% if model and model.on_limit_reached == 'rollover' %}selected{% endif %}>
+          Rollover to new file
+        </option>
+        <option value="pause"
+          {% if model and model.on_limit_reached == 'pause' %}selected{% endif %}>
+          Pause (cooldown)
+        </option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card" id="advancedCard">
+    <div class="card-title">Advanced</div>
+
+    <div id="rolloverGroup" style="display:none;">
+      <div class="form-group">
+        <label class="form-label">Max Rollover Files</label>
+        <input type="number" name="rollover_max_files" class="form-input" min="1"
+               value="{{ model.rollover_max_files if model and model.rollover_max_files else '' }}"
+               placeholder="Leave blank for unlimited" style="max-width: 220px;" />
+        <div class="form-help">Stop after this many files in one session</div>
+      </div>
+    </div>
+
+    <div id="cooldownGroup" style="display:none;">
+      <div class="form-group">
+        <label class="form-label">Cooldown (minutes)</label>
+        <input type="number" name="cooldown_minutes" class="form-input" min="1"
+               value="{{ model.cooldown_minutes if model and model.cooldown_minutes else '' }}"
+               placeholder="e.g. 30" style="max-width: 220px;" />
+        <div class="form-help">Wait this many minutes before resuming after limit is hit</div>
+      </div>
+    </div>
+
+    <p id="advancedNone" class="text-muted text-sm">No extra options for this limit behavior.</p>
+  </div>
+
+  <div class="flex-center gap-12">
+    <button type="submit" class="btn btn-primary">
+      {% if is_new %}Add Model{% else %}Save Changes{% endif %}
+    </button>
+    <a href="/models" class="btn btn-outline">Cancel</a>
+  </div>
+
+</form>
+
+{% if not is_new %}
+<hr class="divider" style="margin-top: 24px;" />
+<div class="flex-center gap-12">
+  <form method="POST" action="/models/{{ model.name }}/delete"
+        onsubmit="return confirm('Permanently delete {{ model.name }}?')">
+    <button type="submit" class="btn btn-danger btn-sm">Delete Model</button>
+  </form>
+  <span class="text-muted text-sm">Removes from config immediately</span>
+</div>
+{% endif %}
+
+<script>
+function updateAdvanced() {
+  var val = document.getElementById('onLimitSelect').value;
+  var rollover = document.getElementById('rolloverGroup');
+  var cooldown = document.getElementById('cooldownGroup');
+  var none     = document.getElementById('advancedNone');
+
+  rollover.style.display = val === 'rollover' ? 'block' : 'none';
+  cooldown.style.display = val === 'pause'    ? 'block' : 'none';
+  none.style.display     = val === 'stop_for_day' ? 'block' : 'none';
+}
+
+document.addEventListener('DOMContentLoaded', updateAdvanced);
+</script>
+{% endblock %}

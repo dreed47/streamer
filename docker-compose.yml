@@ -8,8 +8,10 @@ services:
     shm_size: '256m'
     mem_limit: 1536m
     memswap_limit: 1536m
+    ports:
+      - "${APP_PORT:-5705}:${APP_PORT:-5705}"
     volumes:
-      - ./config.yml:/app/config.yml:ro
+      - ./config.yml:/app/config.yml:rw
     privileged: true
     environment:
       - TZ=${TZ:-Europe/London}   # change as needed

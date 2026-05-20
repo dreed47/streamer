@@ -2,3 +2,4 @@
 venv/
 recordings/
 config.yml
+__pycache__/

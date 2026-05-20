@@ -11,6 +11,10 @@ RUN playwright install chromium --with-deps
 COPY entrypoint.sh /entrypoint.sh
 
 COPY monitor.py .
+COPY web.py .
+COPY templates/ ./templates/
+
+EXPOSE 5705
 
 VOLUME /recordings
 RUN chmod +x /entrypoint.sh

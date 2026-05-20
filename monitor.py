@@ -45,8 +45,10 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 
 active_recordings = {}
 resume_after: dict[str, datetime] = {}
+idle_reason: dict[str, str] = {}
 shutdown = threading.Event()
-_browser_sem = threading.Semaphore(3)  # max concurrent browser instances
+config_lock = threading.Lock()
+_browser_sem = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "3")))
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -712,6 +714,7 @@ def record(model: dict):
     username = model["name"]
     if not _browser_sem.acquire(blocking=False):
         log(username, "max concurrent browsers reached, will retry next poll")
+        idle_reason[username] = "max_concurrent"
         active_recordings.pop(username, None)
         return
     try:
@@ -722,31 +725,51 @@ def record(model: dict):
 
 
 def monitor():
-    names = [m["name"] for m in MODELS if m.get("enabled", True)]
-    print(f"[{time.strftime('%H:%M:%S')}] Monitoring: {names}", flush=True)
     while True:
-        for model in MODELS:
-            if not model.get("enabled", True):
-                continue
+        with config_lock:
+            models = _load_config().get("models", [])
+        for model in models:
             username = model["name"]
+            if not model.get("enabled", True):
+                idle_reason.pop(username, None)
+                continue
             if not _in_poll_window(model):
                 log(username, "outside poll window, skipping")
+                idle_reason[username] = "outside_window"
                 continue
             if username in resume_after:
                 if datetime.now() < resume_after[username]:
+                    idle_reason[username] = "cooldown"
                     continue
                 del resume_after[username]
             t = active_recordings.get(username)
             if t and t.is_alive():
+                idle_reason.pop(username, None)
                 continue
             if is_live(username):
+                idle_reason.pop(username, None)
                 t = threading.Thread(target=record, args=(model,), daemon=True)
                 t.start()
                 active_recordings[username] = t
+            else:
+                idle_reason[username] = "offline"
         time.sleep(POLL_INTERVAL)
 
 
+def _start_web():
+    try:
+        import uvicorn
+        from web import app as _web_app
+        port = int(os.environ.get("APP_PORT", "5705"))
+        print(f"[{time.strftime('%H:%M:%S')}] Web UI starting on port {port}", flush=True)
+        uvicorn.run(_web_app, host="0.0.0.0", port=port, log_level="warning")
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] Web UI failed to start: {e}", flush=True)
+
+
 if __name__ == "__main__":
+    web_thread = threading.Thread(target=_start_web, daemon=True)
+    web_thread.start()
     try:
         monitor()
     except KeyboardInterrupt:
