@@ -675,49 +675,49 @@ async def _record_async(model: dict):
             finally:
                 keep_task.cancel()
                 await browser.close()
-
-            active_recordings.pop(username, None)
+                active_recordings.pop(username, None)
             return
 
     # Non-LLHLS path: requests-based downloader
-    file_count = 0
-    while True:
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
+    try:
+        file_count = 0
+        while True:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
 
-        stop_reason = await loop.run_in_executor(
-            None, _record_with_requests, username, stream_url, cookies, output,
-            effective_time_limit, effective_size_limit,
-        )
+            stop_reason = await loop.run_in_executor(
+                None, _record_with_requests, username, stream_url, cookies, output,
+                effective_time_limit, effective_size_limit,
+            )
 
-        if TRANSCODE_CFG.get("enabled"):
-            model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
-            await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
+            if TRANSCODE_CFG.get("enabled"):
+                model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
+                await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
 
-        file_count += 1
-        if stop_reason not in ("time_limit", "size_limit"):
-            break
-        if on_limit == "rollover":
-            if rollover_max and file_count >= rollover_max:
-                log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
-                resume_after[username] = _next_poll_start(model)
+            file_count += 1
+            if stop_reason not in ("time_limit", "size_limit"):
                 break
-            log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
-            continue
-        elif on_limit == "pause":
-            resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
-            resume_after[username] = resume_dt
-            log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
-            break
-        elif on_limit == "stop_for_day":
-            nps = _next_poll_start(model)
-            resume_after[username] = nps
-            log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
-            break
-        else:
-            break
-
-    active_recordings.pop(username, None)
+            if on_limit == "rollover":
+                if rollover_max and file_count >= rollover_max:
+                    log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
+                    resume_after[username] = _next_poll_start(model)
+                    break
+                log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
+                continue
+            elif on_limit == "pause":
+                resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
+                resume_after[username] = resume_dt
+                log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
+                break
+            elif on_limit == "stop_for_day":
+                nps = _next_poll_start(model)
+                resume_after[username] = nps
+                log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
+                break
+            else:
+                break
+    finally:
+        active_recordings.pop(username, None)
 
 
 def record(model: dict):
