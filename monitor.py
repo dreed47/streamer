@@ -101,6 +101,9 @@ def log(username: str, msg: str):
 
 
 def _transcode_file(username: str, path: Path, cfg: dict):
+    if not path.exists():
+        log(username, f"transcode: source missing (file may have been moved or deleted): {path}")
+        return
     codec = cfg.get("codec", "h264").lower()
     crf = int(cfg.get("crf", 23))
     audio_br = cfg.get("audio_bitrate", "128k")
