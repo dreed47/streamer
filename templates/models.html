@@ -50,7 +50,8 @@
     <span>Poll: {{ model.poll_start_time }} – {{ model.poll_stop_time }}</span>
     {% if model.recording_time_limit %}<span>Time limit: {{ model.recording_time_limit }}</span>{% endif %}
     {% if model.recording_file_size_limit %}<span>Size limit: {{ model.recording_file_size_limit }}</span>{% endif %}
-    <span>On limit: {{ model.on_limit_reached | replace('_', ' ') }}</span>
+    <span>On limit: {{ model.on_limit_reached | replace('_', ' ') }}{% if model.on_limit_reached == 'rollover' and model.rollover_max_files %} (max {{ model.rollover_max_files }}){% endif %}{% if model.on_limit_reached == 'pause' and model.cooldown_minutes %} ({{ model.cooldown_minutes }}m cooldown){% endif %}</span>
+    <span>Audio: {% if model.transcode_no_audio %}stripped{% else %}kept{% endif %}</span>
     {% if model.last_seen %}<span>Last seen: {{ model.last_seen[:10] }}</span>{% endif %}
   </div>
 </div>
