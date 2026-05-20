@@ -38,11 +38,14 @@
     </div>
     {% for f in model_files %}
     {% set stem = f.filename[:-4] %}
-    <div style="padding: 16px 20px; border-bottom: 1px solid var(--border);">
+    <div style="padding: 16px 20px; border-bottom: 1px solid var(--border); cursor: pointer;"
+         onmouseenter="this.style.background='var(--bg)'" onmouseleave="this.style.background=''"
+         onclick="var btn=this.querySelector('.play-btn-{{ stem }}'); togglePlayer('player-{{ stem }}', '/recordings/{{ f.filename }}', btn);">
       <div class="flex-between mb-8">
         <div class="flex-center gap-8">
           <input type="checkbox" name="filenames" value="{{ f.filename }}"
                  class="rec-checkbox" onchange="updateBulkBar()"
+                 onclick="event.stopPropagation();"
                  style="width:16px; height:16px; cursor:pointer; flex-shrink:0;">
           <span class="text-sm" style="font-family: monospace; color: var(--text-muted);">{{ f.filename }}</span>
         </div>
@@ -51,10 +54,10 @@
           {% if f.recorded_at %}
           <span class="text-sm text-muted">{{ f.recorded_at.strftime('%Y-%m-%d %H:%M') }}</span>
           {% endif %}
-          <button type="button" class="btn btn-outline btn-sm"
-                  onclick="togglePlayer('player-{{ stem }}', '/recordings/{{ f.filename }}', this)">▶ Play</button>
+          <button type="button" class="btn btn-outline btn-sm play-btn-{{ stem }}"
+                  onclick="event.stopPropagation(); togglePlayer('player-{{ stem }}', '/recordings/{{ f.filename }}', this)">▶ Play</button>
           <button type="button" class="btn btn-danger btn-sm"
-                  onclick="deleteSingle('{{ f.filename }}')">Delete</button>
+                  onclick="event.stopPropagation(); deleteSingle('{{ f.filename }}')">Delete</button>
         </div>
       </div>
       <div id="player-{{ stem }}" style="display:none; margin-top: 10px;">
