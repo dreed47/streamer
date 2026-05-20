@@ -129,6 +129,18 @@
     <p id="advancedNone" class="text-muted text-sm">No extra options for this limit behavior.</p>
   </div>
 
+  <div class="card">
+    <div class="card-title">Transcoding</div>
+    <div class="form-group">
+      <label class="form-checkbox">
+        <input type="checkbox" name="transcode_no_audio" value="on"
+               {% if model and model.transcode_no_audio %}checked{% endif %} />
+        <span style="font-size: 13px; font-weight: 600; color: var(--text);">Strip audio</span>
+      </label>
+      <div class="form-help" style="margin-top: 4px;">Remove audio track during transcoding. Smaller files; no sound.</div>
+    </div>
+  </div>
+
   <div class="flex-center gap-12">
     <button type="submit" class="btn btn-primary">
       {% if is_new %}Add Model{% else %}Save Changes{% endif %}

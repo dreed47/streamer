@@ -108,6 +108,7 @@ async def model_create(
     on_limit_reached: str = Form("stop_for_day"),
     rollover_max_files: str = Form(""),
     cooldown_minutes: str = Form(""),
+    transcode_no_audio: str = Form("off"),
 ):
     with _state.config_lock:
         config = _load_cfg()
@@ -128,6 +129,7 @@ async def model_create(
             "on_limit_reached": on_limit_reached,
             "rollover_max_files": int(rollover_max_files) if rollover_max_files.strip() else None,
             "cooldown_minutes": int(cooldown_minutes) if cooldown_minutes.strip() else None,
+            "transcode_no_audio": transcode_no_audio == "on",
         }
         config.setdefault("models", []).append(new_model)
         _save_cfg(config)
@@ -160,6 +162,7 @@ async def model_update(
     on_limit_reached: str = Form("stop_for_day"),
     rollover_max_files: str = Form(""),
     cooldown_minutes: str = Form(""),
+    transcode_no_audio: str = Form("off"),
 ):
     with _state.config_lock:
         config = _load_cfg()
@@ -174,6 +177,7 @@ async def model_update(
         model["on_limit_reached"] = on_limit_reached
         model["rollover_max_files"] = int(rollover_max_files) if rollover_max_files.strip() else None
         model["cooldown_minutes"] = int(cooldown_minutes) if cooldown_minutes.strip() else None
+        model["transcode_no_audio"] = transcode_no_audio == "on"
         _save_cfg(config)
     return RedirectResponse(url=f"/models/{name}?success=Saved", status_code=303)
 
