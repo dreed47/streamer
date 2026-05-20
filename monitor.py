@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import time
 import threading
@@ -103,27 +104,28 @@ def _transcode_file(username: str, path: Path, cfg: dict):
     codec = cfg.get("codec", "h264").lower()
     crf = int(cfg.get("crf", 23))
     audio_br = cfg.get("audio_bitrate", "128k")
+    no_audio = cfg.get("no_audio", False)
     vcodec = "libx265" if codec == "h265" else "libx264"
     preset = cfg.get("preset", "fast")
     threads = str(cfg.get("threads", 0))
 
-    tmp = path.with_suffix(".transcoding.mp4")
+    tmp = Path("/tmp") / (path.stem + ".transcoding.mp4")
     tc_path = path.with_name(path.stem + "_tc" + path.suffix)
-    extra_v = ["-tag:v", "hvc1"] if codec == "h265" else []
+    audio_flags = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", audio_br]
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", str(path),
         "-c:v", vcodec, "-crf", str(crf), "-preset", preset, "-threads", threads,
         "-pix_fmt", "yuv420p",
-        *extra_v,
-        "-c:a", "aac", "-b:a", audio_br,
+        *audio_flags,
         "-movflags", "+faststart",
         "-y", str(tmp),
     ]
 
     size_mb = path.stat().st_size / 1024 / 1024
     timeout_s = max(300, int(size_mb * 10))  # ~10s per MB, min 5min
-    log(username, f"transcoding {path.name} ({vcodec} preset={preset} crf={crf} {size_mb:.0f}MB, timeout={timeout_s}s)")
+    audio_desc = "no audio" if no_audio else f"audio={audio_br}"
+    log(username, f"transcoding {path.name} ({vcodec} preset={preset} crf={crf} {audio_desc} {size_mb:.0f}MB, timeout={timeout_s}s)")
     t0 = time.time()
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
@@ -143,7 +145,7 @@ def _transcode_file(username: str, path: Path, cfg: dict):
             tmp.unlink(missing_ok=True)
             return
         pct = 100 * (1 - new_size / orig_size) if orig_size else 0
-        tmp.rename(tc_path)
+        shutil.move(str(tmp), str(tc_path))
         path.unlink()
         log(username, f"transcode done in {elapsed:.0f}s: {path.name} -> {tc_path.name} ({orig_size//1024//1024}MB -> {new_size//1024//1024}MB, {pct:.0f}% smaller)")
     except subprocess.TimeoutExpired:
@@ -645,7 +647,8 @@ async def _record_async(model: dict):
                     log(username, f"done: {output.name}")
 
                     if TRANSCODE_CFG.get("enabled"):
-                        await loop.run_in_executor(None, _transcode_file, username, output, TRANSCODE_CFG)
+                        model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
+                        await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
 
                     file_count += 1
                     if stop_reason not in ("time_limit", "size_limit"):
@@ -688,7 +691,8 @@ async def _record_async(model: dict):
         )
 
         if TRANSCODE_CFG.get("enabled"):
-            await loop.run_in_executor(None, _transcode_file, username, output, TRANSCODE_CFG)
+            model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
+            await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
 
         file_count += 1
         if stop_reason not in ("time_limit", "size_limit"):
