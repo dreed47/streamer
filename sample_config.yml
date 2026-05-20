@@ -9,6 +9,7 @@ models:
     on_limit_reached: "stop_for_day"   # stop until next poll_start_time
     rollover_max_files: null
     cooldown_minutes: null
+    transcode_no_audio: false          # strip audio track when transcoding (overrides global setting)
 
   - name: "Bob Smith"
     enabled: true
@@ -20,6 +21,7 @@ models:
     on_limit_reached: "rollover"       # start new file, up to rollover_max_files
     rollover_max_files: 5
     cooldown_minutes: null
+    transcode_no_audio: false
 
   - name: "Carol Davis"
     enabled: true
@@ -31,6 +33,7 @@ models:
     on_limit_reached: "pause"          # stop, resume after cooldown_minutes
     rollover_max_files: null
     cooldown_minutes: 15
+    transcode_no_audio: false
 
   # on_limit_reached options (triggers on whichever limit hits first — time or size):
   #   stop_for_day  - no more recordings until next poll_start_time
@@ -38,4 +41,5 @@ models:
   #   pause         - wait cooldown_minutes then allow resume
   #   ignore        - continue past both limits
 
-# Transcoding is configured via environment variables in .env — see TRANSCODE_* settings there.
+# Transcoding codec/quality/preset settings live in .env (TRANSCODE_* vars).
+# transcode_no_audio is per-model: set true to drop audio when transcoding this model.
