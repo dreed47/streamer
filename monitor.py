@@ -634,12 +634,12 @@ async def _record_async(model: dict):
                                 f.flush()
                                 seg_count += 1
                                 if seg_count % 20 == 0:
-                                    log(username, f"segs: {seg_count}, file: {output.stat().st_size}B")
+                                    log(username, f"segs: {seg_count}, file: {f.tell()}B")
                             if effective_time_limit and (time.time() - file_start) >= effective_time_limit:
                                 log(username, f"time limit reached ({effective_time_limit}s)")
                                 stop_reason = "time_limit"
                                 break
-                            if effective_size_limit and output.stat().st_size >= effective_size_limit:
+                            if effective_size_limit and f.tell() >= effective_size_limit:
                                 log(username, f"size limit reached ({effective_size_limit}B)")
                                 stop_reason = "size_limit"
                                 break
