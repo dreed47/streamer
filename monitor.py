@@ -744,10 +744,10 @@ def monitor():
                 del resume_after[username]
             t = active_recordings.get(username)
             if t and t.is_alive():
-                idle_reason.pop(username, None)
+                idle_reason.pop(username, None)  # confirmed recording
                 continue
             if is_live(username):
-                idle_reason.pop(username, None)
+                idle_reason[username] = "starting"
                 t = threading.Thread(target=record, args=(model,), daemon=True)
                 t.start()
                 active_recordings[username] = t
