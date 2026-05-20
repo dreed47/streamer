@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 import monitor as _monitor
 
-_RECORDING_RE = re.compile(r'^(.+)_(\d{8}_\d{6})\.mp4$')
+_RECORDING_RE = re.compile(r'^(.+)_(\d{8}_\d{6})(?:_tc)?\.mp4$')
 
 app = FastAPI()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
