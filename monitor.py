@@ -134,6 +134,14 @@ def _transcode_file(username: str, path: Path, cfg: dict):
             return
         orig_size = path.stat().st_size
         new_size = tmp.stat().st_size
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", str(tmp)],
+            capture_output=True, timeout=30
+        )
+        if probe.returncode != 0:
+            log(username, f"transcode output invalid (moov missing?), keeping original")
+            tmp.unlink(missing_ok=True)
+            return
         pct = 100 * (1 - new_size / orig_size) if orig_size else 0
         tmp.rename(tc_path)
         path.unlink()
