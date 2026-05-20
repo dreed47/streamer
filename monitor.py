@@ -516,6 +516,7 @@ async def _record_async(model: dict):
 
         if not stream_url:
             log(username, "no stream URL found — will retry on next poll")
+            idle_reason[username] = "no_stream"
             await browser.close()
             active_recordings.pop(username, None)
             return
@@ -567,6 +568,7 @@ async def _record_async(model: dict):
 
             if init_data is None:
                 log(username, "could not capture init segment, aborting")
+                idle_reason[username] = "no_stream"
                 await browser.close()
                 active_recordings.pop(username, None)
                 return

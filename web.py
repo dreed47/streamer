@@ -47,6 +47,8 @@ def _model_status(name: str, model: dict) -> tuple[str, str, str]:
         return "idle", "Max concurrent", "badge-neutral"
     if reason == "starting":
         return "idle", "Starting…", "badge-warning"
+    if reason == "no_stream":
+        return "idle", "No stream", "badge-neutral"
     return "idle", "Idle", "badge-neutral"
 
 
