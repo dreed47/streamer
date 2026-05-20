@@ -44,7 +44,7 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 # ===============================================
 
-from state import active_recordings, resume_after, idle_reason, shutdown, config_lock, daily_file_counts
+from state import active_recordings, resume_after, resume_reason, idle_reason, shutdown, config_lock, daily_file_counts
 _browser_sem = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "3")))
 
 _UA = (
@@ -374,6 +374,7 @@ async def _record_async(model: dict):
         if daily_file_counts.get(daily_key, 0) >= rollover_max:
             log(username, f"rollover max ({rollover_max} files) already reached today, skipping")
             resume_after[username] = _next_poll_start(model)
+            resume_reason[username] = "rollover_limit"
             active_recordings.pop(username, None)
             return
 
@@ -666,22 +667,26 @@ async def _record_async(model: dict):
                         if on_limit == "rollover" and rollover_max and file_count >= rollover_max:
                             log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
                             resume_after[username] = _next_poll_start(model)
+                            resume_reason[username] = "rollover_limit"
                         break
                     if on_limit == "rollover":
                         if rollover_max and file_count >= rollover_max:
                             log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
                             resume_after[username] = _next_poll_start(model)
+                            resume_reason[username] = "rollover_limit"
                             break
                         log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
                         continue
                     elif on_limit == "pause":
                         resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
                         resume_after[username] = resume_dt
+                        resume_reason[username] = "cooldown"
                         log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
                         break
                     elif on_limit == "stop_for_day":
                         nps = _next_poll_start(model)
                         resume_after[username] = nps
+                        resume_reason[username] = "stop_for_day"
                         log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
                         break
                     else:
@@ -713,22 +718,26 @@ async def _record_async(model: dict):
                 if on_limit == "rollover" and rollover_max and file_count >= rollover_max:
                     log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
                     resume_after[username] = _next_poll_start(model)
+                    resume_reason[username] = "rollover_limit"
                 break
             if on_limit == "rollover":
                 if rollover_max and file_count >= rollover_max:
                     log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
                     resume_after[username] = _next_poll_start(model)
+                    resume_reason[username] = "rollover_limit"
                     break
                 log(username, f"limit hit ({stop_reason}) — rolling over (file {file_count + 1})")
                 continue
             elif on_limit == "pause":
                 resume_dt = datetime.now() + timedelta(minutes=cooldown_mins)
                 resume_after[username] = resume_dt
+                resume_reason[username] = "cooldown"
                 log(username, f"limit hit ({stop_reason}), pausing {cooldown_mins}m — resume after {resume_dt.strftime('%H:%M:%S')}")
                 break
             elif on_limit == "stop_for_day":
                 nps = _next_poll_start(model)
                 resume_after[username] = nps
+                resume_reason[username] = "stop_for_day"
                 log(username, f"limit hit ({stop_reason}), stopped for day — resume at {nps.strftime('%H:%M:%S')}")
                 break
             else:
@@ -766,9 +775,10 @@ def monitor():
                 continue
             if username in resume_after:
                 if datetime.now() < resume_after[username]:
-                    idle_reason[username] = "cooldown"
+                    idle_reason[username] = resume_reason.get(username, "cooldown")
                     continue
                 del resume_after[username]
+                resume_reason.pop(username, None)
             t = active_recordings.get(username)
             if t and t.is_alive():
                 idle_reason.pop(username, None)  # confirmed recording

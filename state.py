@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 active_recordings: dict = {}
 resume_after: dict[str, datetime] = {}
+resume_reason: dict[str, str] = {}  # why resume_after was set: "cooldown", "stop_for_day", "rollover_limit"
 idle_reason: dict[str, str] = {}
 shutdown = threading.Event()
 config_lock = threading.Lock()

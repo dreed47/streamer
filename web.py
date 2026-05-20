@@ -35,6 +35,11 @@ def _model_status(name: str, model: dict) -> tuple[str, str, str]:
         return "recording", "Recording", "badge-warning"
     if name in _state.resume_after:
         dt = _state.resume_after[name]
+        reason = _state.resume_reason.get(name, "cooldown")
+        if reason == "rollover_limit":
+            return "idle", f"Daily limit · resumes {dt.strftime('%H:%M')}", "badge-neutral"
+        if reason == "stop_for_day":
+            return "idle", f"Stopped for day · resumes {dt.strftime('%H:%M')}", "badge-neutral"
         return "cooldown", f"Cooldown · {dt.strftime('%H:%M')}", "badge-warning"
     if not model.get("enabled", True):
         return "idle", "Disabled", "badge-neutral"
