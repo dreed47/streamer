@@ -44,7 +44,7 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 # ===============================================
 
-from state import active_recordings, resume_after, idle_reason, shutdown, config_lock
+from state import active_recordings, resume_after, idle_reason, shutdown, config_lock, daily_file_counts
 _browser_sem = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "3")))
 
 _UA = (
@@ -369,6 +369,14 @@ async def _record_async(model: dict):
     effective_size_limit = None if on_limit == "ignore" else size_limit
     loop = asyncio.get_event_loop()
 
+    daily_key = (username, date.today())
+    if on_limit == "rollover" and rollover_max:
+        if daily_file_counts.get(daily_key, 0) >= rollover_max:
+            log(username, f"rollover max ({rollover_max} files) already reached today, skipping")
+            resume_after[username] = _next_poll_start(model)
+            active_recordings.pop(username, None)
+            return
+
     # Collects (url, bytes) for MOUFLON init+part MP4s as browser downloads them.
     # Populated by on_response before we even know if stream is LLHLS.
     media_queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
@@ -599,7 +607,6 @@ async def _record_async(model: dict):
 
             keep_task = asyncio.create_task(keep_playing())
 
-            file_count = 0
             seen_parts: set[str] = set()
 
             try:
@@ -653,8 +660,12 @@ async def _record_async(model: dict):
                         model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
                         await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
 
-                    file_count += 1
+                    daily_file_counts[daily_key] = daily_file_counts.get(daily_key, 0) + 1
+                    file_count = daily_file_counts[daily_key]
                     if stop_reason not in ("time_limit", "size_limit"):
+                        if on_limit == "rollover" and rollover_max and file_count >= rollover_max:
+                            log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
+                            resume_after[username] = _next_poll_start(model)
                         break
                     if on_limit == "rollover":
                         if rollover_max and file_count >= rollover_max:
@@ -683,7 +694,6 @@ async def _record_async(model: dict):
 
     # Non-LLHLS path: requests-based downloader
     try:
-        file_count = 0
         while True:
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             output = RECORDINGS_DIR / f"{username}_{timestamp}.mp4"
@@ -697,8 +707,12 @@ async def _record_async(model: dict):
                 model_tc_cfg = {**TRANSCODE_CFG, "no_audio": model.get("transcode_no_audio", False)}
                 await loop.run_in_executor(None, _transcode_file, username, output, model_tc_cfg)
 
-            file_count += 1
+            daily_file_counts[daily_key] = daily_file_counts.get(daily_key, 0) + 1
+            file_count = daily_file_counts[daily_key]
             if stop_reason not in ("time_limit", "size_limit"):
+                if on_limit == "rollover" and rollover_max and file_count >= rollover_max:
+                    log(username, f"rollover max ({rollover_max} files) reached, stopped for day")
+                    resume_after[username] = _next_poll_start(model)
                 break
             if on_limit == "rollover":
                 if rollover_max and file_count >= rollover_max:
