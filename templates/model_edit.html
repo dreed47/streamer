@@ -140,49 +140,9 @@ model.name if model else "Add Model" %} {% block content %}
         id="onLimitSelect"
         onchange="updateAdvanced()"
       >
-        <option
-          value="stop_for_day"
-          {%
-          if
-          not
-          model
-          or
-          model.on_limit_reached=""
-          ="stop_for_day"
-          %}selected{%
-          endif
-          %}
-        >
-          Stop for day
-        </option>
-        <option
-          value="rollover"
-          {%
-          if
-          model
-          and
-          model.on_limit_reached=""
-          ="rollover"
-          %}selected{%
-          endif
-          %}
-        >
-          Rollover to new file
-        </option>
-        <option
-          value="pause"
-          {%
-          if
-          model
-          and
-          model.on_limit_reached=""
-          ="pause"
-          %}selected{%
-          endif
-          %}
-        >
-          Pause (cooldown)
-        </option>
+        <option value="stop_for_day" {% if not model or model.on_limit_reached == "stop_for_day" %}selected{% endif %}>Stop for day</option>
+        <option value="rollover" {% if model and model.on_limit_reached == "rollover" %}selected{% endif %}>Rollover to new file</option>
+        <option value="pause" {% if model and model.on_limit_reached == "pause" %}selected{% endif %}>Pause (cooldown)</option>
       </select>
     </div>
   </div>
