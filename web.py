@@ -106,8 +106,8 @@ async def model_new_form(request: Request, error: str = ""):
 async def model_create(
     name: str = Form(...),
     enabled: str = Form("off"),
-    poll_start_time: str = Form("08:00:00"),
-    poll_stop_time: str = Form("23:00:00"),
+    poll_start_time: str = Form(""),
+    poll_stop_time: str = Form(""),
     recording_time_limit: str = Form(""),
     recording_file_size_limit: str = Form(""),
     on_limit_reached: str = Form("stop_for_day"),
@@ -127,8 +127,8 @@ async def model_create(
             "name": name,
             "enabled": enabled == "on",
             "last_seen": None,
-            "poll_start_time": poll_start_time,
-            "poll_stop_time": poll_stop_time,
+            "poll_start_time": poll_start_time or None,
+            "poll_stop_time": poll_stop_time or None,
             "recording_time_limit": recording_time_limit or None,
             "recording_file_size_limit": recording_file_size_limit or None,
             "on_limit_reached": on_limit_reached,
@@ -160,8 +160,8 @@ async def model_edit_form(request: Request, name: str, success: str = "", error:
 async def model_update(
     name: str,
     enabled: str = Form("off"),
-    poll_start_time: str = Form(...),
-    poll_stop_time: str = Form(...),
+    poll_start_time: str = Form(""),
+    poll_stop_time: str = Form(""),
     recording_time_limit: str = Form(""),
     recording_file_size_limit: str = Form(""),
     on_limit_reached: str = Form("stop_for_day"),
@@ -175,8 +175,8 @@ async def model_update(
         if not model:
             return RedirectResponse(url="/models?error=Model+not+found", status_code=303)
         model["enabled"] = enabled == "on"
-        model["poll_start_time"] = poll_start_time
-        model["poll_stop_time"] = poll_stop_time
+        model["poll_start_time"] = poll_start_time or None
+        model["poll_stop_time"] = poll_stop_time or None
         model["recording_time_limit"] = recording_time_limit or None
         model["recording_file_size_limit"] = recording_file_size_limit or None
         model["on_limit_reached"] = on_limit_reached

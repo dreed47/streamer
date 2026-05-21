@@ -54,8 +54,23 @@ _UA = (
 )
 
 
+def _parse_time(val):
+    """Parse HH:MM or HH:MM:SS, return time or None if blank/null."""
+    if not val:
+        return None
+    s = str(val).strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(s, fmt).time()
+        except ValueError:
+            pass
+    return None
+
+
 def _next_poll_start(model: dict) -> datetime:
-    start_t = datetime.strptime(model["poll_start_time"], "%H:%M:%S").time()
+    start_t = _parse_time(model.get("poll_start_time"))
+    if start_t is None:
+        return datetime.now()
     today_start = datetime.combine(date.today(), start_t)
     if datetime.now() < today_start:
         return today_start
@@ -90,9 +105,13 @@ def _normalize_stream_url(url: str) -> str:
 
 
 def _in_poll_window(model: dict) -> bool:
+    start = _parse_time(model.get("poll_start_time"))
+    stop  = _parse_time(model.get("poll_stop_time"))
+    if start is None or stop is None:
+        return True  # no restriction
     now = datetime.now().time()
-    start = datetime.strptime(model["poll_start_time"], "%H:%M:%S").time()
-    stop  = datetime.strptime(model["poll_stop_time"],  "%H:%M:%S").time()
+    if stop < start:  # overnight window e.g. 22:00 -> 04:00
+        return now >= start or now <= stop
     return start <= now <= stop
 
 

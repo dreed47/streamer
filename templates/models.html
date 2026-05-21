@@ -1,89 +1,134 @@
-{% extends "base.html" %}
-{% set active_page = "models" %}
-{% set page_title = "Models" %}
-
-{% block content %}
+{% extends "base.html" %} {% set active_page = "models" %} {% set page_title =
+"Models" %} {% block content %}
 <div class="page-header flex-between">
   <div>
     <h1>Models</h1>
-    <p>{{ models|length }} model{% if models|length != 1 %}s{% endif %} configured</p>
+    <p>
+      {{ models|length }} model{% if models|length != 1 %}s{% endif %}
+      configured
+    </p>
   </div>
   <a href="/models/new" class="btn btn-primary">+ Add Model</a>
 </div>
 
-{% if success %}<div class="flash flash-success">✓ {{ success }}</div>{% endif %}
-{% if error %}<div class="flash flash-error">✗ {{ error }}</div>{% endif %}
-
-{% if models %}
-{% for model in models %}
+{% if success %}
+<div class="flash flash-success">✓ {{ success }}</div>
+{% endif %} {% if error %}
+<div class="flash flash-error">✗ {{ error }}</div>
+{% endif %} {% if models %} {% for model in models %}
 <div class="card">
   <div class="flex-between mb-8">
     <div>
       <div class="flex-center gap-8 mb-6">
-        <span style="font-size: 15px; font-weight: 700;">{{ model.name }}</span>
+        <span style="font-size: 15px; font-weight: 700">{{ model.name }}</span>
         {% if model.enabled %}
-          <span class="badge badge-success">Enabled</span>
+        <span class="badge badge-success">Enabled</span>
         {% else %}
-          <span class="badge badge-danger">Disabled</span>
+        <span class="badge badge-danger">Disabled</span>
         {% endif %}
       </div>
       <div class="flex-center gap-6">
-        <span class="status-dot dot-{{ model._status }}" id="dot-{{ model.name }}"></span>
-        <span class="badge {{ model._status_badge }}" id="status-{{ model.name }}" data-badge="{{ model._status_badge }}">{{ model._status_label }}</span>
+        <span
+          class="status-dot dot-{{ model._status }}"
+          id="dot-{{ model.name }}"
+        ></span>
+        <span
+          class="badge {{ model._status_badge }}"
+          id="status-{{ model.name }}"
+          data-badge="{{ model._status_badge }}"
+          >{{ model._status_label }}</span
+        >
       </div>
     </div>
     <div class="flex-center gap-8">
-      {% if model._video_count %}<a href="/recordings?model={{ model.name }}" class="btn btn-outline btn-sm">Videos ({{ model._video_count }})</a>{% endif %}
+      {% if model._video_count %}<a
+        href="/recordings?model={{ model.name }}"
+        class="btn btn-outline btn-sm"
+        >Videos ({{ model._video_count }})</a
+      >{% endif %}
       <a href="/models/{{ model.name }}" class="btn btn-outline btn-sm">Edit</a>
-      <form method="POST" action="/models/{{ model.name }}/toggle" style="display:inline;">
+      <form
+        method="POST"
+        action="/models/{{ model.name }}/toggle"
+        style="display: inline"
+      >
         <button type="submit" class="btn btn-outline btn-sm">
           {% if model.enabled %}Disable{% else %}Enable{% endif %}
         </button>
       </form>
-      <form method="POST" action="/models/{{ model.name }}/delete" style="display:inline;"
-            onsubmit="return confirm('Delete {{ model.name }}? This cannot be undone.')">
+      <form
+        method="POST"
+        action="/models/{{ model.name }}/delete"
+        style="display: inline"
+        onsubmit="return confirm('Delete {{ model.name }}? This cannot be undone.')"
+      >
         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
       </form>
     </div>
   </div>
   <div class="flex flex-wrap gap-16 text-sm text-muted">
-    <span>Poll: {{ model.poll_start_time }} – {{ model.poll_stop_time }}</span>
-    {% if model.recording_time_limit %}<span>Time limit: {{ model.recording_time_limit }}</span>{% endif %}
-    {% if model.recording_file_size_limit %}<span>Size limit: {{ model.recording_file_size_limit }}</span>{% endif %}
-    <span>On limit: {{ model.on_limit_reached | replace('_', ' ') }}{% if model.on_limit_reached == 'rollover' and model.rollover_max_files %} (max {{ model.rollover_max_files }}){% endif %}{% if model.on_limit_reached == 'pause' and model.cooldown_minutes %} ({{ model.cooldown_minutes }}m cooldown){% endif %}</span>
-    <span>Audio: {% if model.transcode_no_audio %}stripped{% else %}kept{% endif %}</span>
-    {% if model.last_seen %}<span>Last seen: {{ model.last_seen[:10] }}</span>{% endif %}
+    <span
+      >Poll: {% if model.poll_start_time and model.poll_stop_time %}{{
+      model.poll_start_time }} – {{ model.poll_stop_time }}{% else %}always{%
+      endif %}</span
+    >
+    {% if model.recording_time_limit %}<span
+      >Time limit: {{ model.recording_time_limit }}</span
+    >{% endif %} {% if model.recording_file_size_limit %}<span
+      >Size limit: {{ model.recording_file_size_limit }}</span
+    >{% endif %}
+    <span
+      >On limit: {{ model.on_limit_reached | replace('_', ' ') }}{% if
+      model.on_limit_reached == 'rollover' and model.rollover_max_files %} (max
+      {{ model.rollover_max_files }}){% endif %}{% if model.on_limit_reached ==
+      'pause' and model.cooldown_minutes %} ({{ model.cooldown_minutes }}m
+      cooldown){% endif %}</span
+    >
+    <span
+      >Audio: {% if model.transcode_no_audio %}stripped{% else %}kept{% endif
+      %}</span
+    >
+    {% if model.last_seen %}<span>Last seen: {{ model.last_seen[:10] }}</span>{%
+    endif %}
   </div>
 </div>
-{% endfor %}
-{% else %}
+{% endfor %} {% else %}
 <div class="card">
-  <p class="text-muted">No models configured. <a href="/models/new" style="color: var(--primary);">Add one</a>.</p>
+  <p class="text-muted">
+    No models configured.
+    <a href="/models/new" style="color: var(--primary)">Add one</a>.
+  </p>
 </div>
 {% endif %}
 
 <script>
-(function() {
-  function updateStatus() {
-    fetch('/api/status', { cache: 'no-store' })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var statuses = data.statuses || {};
-        document.querySelectorAll('[id^="dot-"]').forEach(function(dot) {
-          var name = dot.id.replace('dot-', '');
-          var badge = document.getElementById('status-' + name);
-          var st = statuses[name] || { status: 'idle', label: 'Idle', badge: 'badge-neutral' };
-          dot.className = 'status-dot dot-' + st.status;
-          if (badge) {
-            badge.className = 'badge ' + st.badge;
-            badge.textContent = st.label;
-          }
-        });
-      })
-      .catch(function() {});
-  }
+  (function () {
+    function updateStatus() {
+      fetch("/api/status", { cache: "no-store" })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (data) {
+          var statuses = data.statuses || {};
+          document.querySelectorAll('[id^="dot-"]').forEach(function (dot) {
+            var name = dot.id.replace("dot-", "");
+            var badge = document.getElementById("status-" + name);
+            var st = statuses[name] || {
+              status: "idle",
+              label: "Idle",
+              badge: "badge-neutral",
+            };
+            dot.className = "status-dot dot-" + st.status;
+            if (badge) {
+              badge.className = "badge " + st.badge;
+              badge.textContent = st.label;
+            }
+          });
+        })
+        .catch(function () {});
+    }
 
-  setInterval(updateStatus, 10000);
-})();
+    setInterval(updateStatus, 10000);
+  })();
 </script>
 {% endblock %}
