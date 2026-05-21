@@ -68,6 +68,24 @@ def _video_counts() -> dict[str, int]:
     return counts
 
 
+def _rename_model_runtime_state(old_name: str, new_name: str):
+    if old_name == new_name:
+        return
+
+    for mapping in (_state.active_recordings, _state.resume_after, _state.resume_reason, _state.idle_reason):
+        if old_name in mapping and new_name not in mapping:
+            mapping[new_name] = mapping.pop(old_name)
+
+    # Move per-day rollover counts to the new username key.
+    for (uname, day), count in list(_state.daily_file_counts.items()):
+        if uname != old_name:
+            continue
+        old_key = (uname, day)
+        new_key = (new_name, day)
+        _state.daily_file_counts[new_key] = _state.daily_file_counts.get(new_key, 0) + count
+        _state.daily_file_counts.pop(old_key, None)
+
+
 @app.get("/", response_class=RedirectResponse)
 async def root():
     return RedirectResponse(url="/models")
@@ -159,6 +177,7 @@ async def model_edit_form(request: Request, name: str, success: str = "", error:
 @app.post("/models/{name}")
 async def model_update(
     name: str,
+    model_name: str = Form(...),
     enabled: str = Form("off"),
     poll_start_time: str = Form(""),
     poll_stop_time: str = Form(""),
@@ -171,9 +190,17 @@ async def model_update(
 ):
     with _state.config_lock:
         config = _load_cfg()
+        new_name = model_name.strip()
+        if not new_name:
+            return RedirectResponse(url=f"/models/{name}?error=Model+name+is+required", status_code=303)
+
+        if new_name != name and any(m["name"] == new_name for m in config.get("models", [])):
+            return RedirectResponse(url=f"/models/{name}?error=Model+%27{new_name}%27+already+exists", status_code=303)
+
         model = next((m for m in config.get("models", []) if m["name"] == name), None)
         if not model:
             return RedirectResponse(url="/models?error=Model+not+found", status_code=303)
+        model["name"] = new_name
         model["enabled"] = enabled == "on"
         model["poll_start_time"] = poll_start_time or None
         model["poll_stop_time"] = poll_stop_time or None
@@ -183,8 +210,9 @@ async def model_update(
         model["rollover_max_files"] = int(rollover_max_files) if rollover_max_files.strip() else None
         model["cooldown_minutes"] = int(cooldown_minutes) if cooldown_minutes.strip() else None
         model["transcode_no_audio"] = transcode_no_audio == "on"
+        _rename_model_runtime_state(name, new_name)
         _save_cfg(config)
-    return RedirectResponse(url=f"/models/{name}?success=Saved", status_code=303)
+    return RedirectResponse(url=f"/models/{new_name}?success=Saved", status_code=303)
 
 
 @app.post("/models/{name}/delete")

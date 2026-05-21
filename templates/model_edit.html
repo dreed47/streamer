@@ -41,7 +41,15 @@ model.name if model else "Add Model" %} {% block content %}
     {% else %}
     <div class="form-group">
       <label class="form-label">Model Name</label>
-      <div class="mono-box">{{ model.name }}</div>
+      <input
+        type="text"
+        name="model_name"
+        class="form-input"
+        required
+        value="{{ model.name }}"
+        autocomplete="off"
+      />
+      <div class="form-help">Must match the exact username on Stripchat</div>
     </div>
     {% endif %}
 
