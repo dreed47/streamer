@@ -804,7 +804,28 @@ def _start_web():
         print(f"[{time.strftime('%H:%M:%S')}] Web UI failed to start: {e}", flush=True)
 
 
+def _init_daily_file_counts():
+    """Scan existing recordings to pre-populate daily_file_counts on startup."""
+    today_str = date.today().strftime("%Y%m%d")
+    pattern = re.compile(r'^(.+)_(\d{8})_\d{6}(?:_tc)?\.mp4$')
+    try:
+        for f in RECORDINGS_DIR.iterdir():
+            if not f.is_file():
+                continue
+            m = pattern.match(f.name)
+            if m and m.group(2) == today_str:
+                username = m.group(1)
+                key = (username, date.today())
+                daily_file_counts[key] = daily_file_counts.get(key, 0) + 1
+        if daily_file_counts:
+            for (u, _), cnt in daily_file_counts.items():
+                print(f"[{time.strftime('%H:%M:%S')}][{u}] startup: {cnt} recording(s) found for today", flush=True)
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] init_daily_file_counts error: {e}", flush=True)
+
+
 if __name__ == "__main__":
+    _init_daily_file_counts()
     web_thread = threading.Thread(target=_start_web, daemon=True)
     web_thread.start()
     try:
