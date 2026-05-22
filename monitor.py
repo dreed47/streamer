@@ -70,7 +70,7 @@ def _parse_time(val):
 def _next_poll_start(model: dict) -> datetime:
     start_t = _parse_time(model.get("poll_start_time"))
     if start_t is None:
-        return datetime.now()
+        return datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
     today_start = datetime.combine(date.today(), start_t)
     if datetime.now() < today_start:
         return today_start
@@ -472,7 +472,10 @@ async def _record_async(model: dict):
         except Exception as e:
             log(username, f"page.goto: {e}")
 
-        await page.bring_to_front()
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
         try:
             await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
         except Exception:
