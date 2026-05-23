@@ -187,6 +187,7 @@ def is_live(username: str) -> bool:
             timeout=15,
         )
         cam = r.json().get("cam", {})
+        log(username, f"cam_debug={cam}")
         active = cam.get("isCamActive", False)
         log(username, f"isCamActive={active}")
         return active
