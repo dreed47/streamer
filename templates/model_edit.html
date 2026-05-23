@@ -136,7 +136,7 @@ model.name if model else "Add Model" %} {% block content %}
           value="{{ model.recording_file_size_limit if model and model.recording_file_size_limit else '' }}"
           placeholder="e.g. 250MB, 1GB"
         />
-        <div class="form-help">Leave blank for no limit</div>
+        <div class="form-help">Leave blank for no limit. Note: at ~3 Mbps, 250MB ≈ 11 min, 1GB ≈ 44 min.</div>
       </div>
     </div>
 
@@ -156,6 +156,7 @@ model.name if model else "Add Model" %} {% block content %}
         <option value="rollover" {{_sel_rollover}}>Rollover to new file</option>
         <option value="pause" {{_sel_pause}}>Pause (cooldown)</option>
       </select>
+      <div class="form-help">Fires on whichever limit is hit first — time or size. If both are set and size limit is small, it may trigger long before the time limit.</div>
     </div>
   </div>
 
