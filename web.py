@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -212,6 +212,10 @@ async def model_update(
         model["transcode_no_audio"] = transcode_no_audio == "on"
         _rename_model_runtime_state(name, new_name)
         _save_cfg(config)
+    _state.resume_after.pop(new_name, None)
+    _state.resume_reason.pop(new_name, None)
+    _state.idle_reason.pop(new_name, None)
+    _state.daily_file_counts.pop((new_name, date.today()), None)
     return RedirectResponse(url=f"/models/{new_name}?success=Saved", status_code=303)
 
 
@@ -233,6 +237,10 @@ async def model_toggle(name: str):
                 m["enabled"] = not m.get("enabled", True)
                 break
         _save_cfg(config)
+    _state.resume_after.pop(name, None)
+    _state.resume_reason.pop(name, None)
+    _state.idle_reason.pop(name, None)
+    _state.daily_file_counts.pop((name, date.today()), None)
     return RedirectResponse(url="/models", status_code=303)
 
 
