@@ -624,13 +624,13 @@ async def _record_async(model: dict):
                         await page.evaluate(
                             "document.querySelectorAll('video').forEach(v => v.play().catch(() => {}))"
                         )
-                    except Exception:
-                        return
+                    except Exception as e:
+                        log(username, f"keep_playing evaluate error (retrying): {e}")
+                        await asyncio.sleep(5)
+                        continue
                     await asyncio.sleep(15)
 
             keep_task = asyncio.create_task(keep_playing())
-
-            seen_parts: set[str] = set()
 
             try:
                 while True:  # rollover loop
@@ -640,6 +640,7 @@ async def _record_async(model: dict):
                     seg_count = 0
                     file_start = time.time()
                     stop_reason = "shutdown"
+                    seen_parts: set[str] = set()
 
                     with open(output, "wb") as f:
                         f.write(init_data)
