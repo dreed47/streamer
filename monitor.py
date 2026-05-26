@@ -42,6 +42,8 @@ RECORDINGS_DIR = Path("/recordings")
 RECORDINGS_DIR.mkdir(exist_ok=True)
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
+LLHLS_QUEUE_TIMEOUT = int(os.environ.get("LLHLS_QUEUE_TIMEOUT", "30"))
+LLHLS_STALL_RETRIES = int(os.environ.get("LLHLS_STALL_RETRIES", "12"))
 # ===============================================
 
 from state import active_recordings, resume_after, resume_reason, idle_reason, shutdown, config_lock, daily_file_counts
@@ -143,6 +145,17 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         "-movflags", "+faststart",
         "-y", str(tmp),
     ]
+    retry_cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-fflags", "+genpts+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "-i", str(path),
+        "-c:v", vcodec, "-crf", str(crf), "-preset", preset, "-threads", threads,
+        "-pix_fmt", "yuv420p",
+        *audio_flags,
+        "-movflags", "+faststart",
+        "-y", str(tmp),
+    ]
 
     size_mb = path.stat().st_size / 1024 / 1024
     timeout_s = max(300, int(size_mb * 10))  # ~10s per MB, min 5min
@@ -153,9 +166,16 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         elapsed = time.time() - t0
         if result.returncode != 0:
-            log(username, f"ffmpeg error after {elapsed:.0f}s: {result.stderr[-300:]}")
+            log(username, f"ffmpeg error after {elapsed:.0f}s, retrying with tolerant decode: {result.stderr[-300:]}")
             tmp.unlink(missing_ok=True)
-            return
+            t1 = time.time()
+            retry = subprocess.run(retry_cmd, capture_output=True, text=True, timeout=timeout_s)
+            retry_elapsed = time.time() - t1
+            if retry.returncode != 0:
+                log(username, f"ffmpeg retry failed after {retry_elapsed:.0f}s: {retry.stderr[-300:]}")
+                tmp.unlink(missing_ok=True)
+                return
+            elapsed += retry_elapsed
         orig_size = path.stat().st_size
         new_size = tmp.stat().st_size
         probe = subprocess.run(
@@ -641,6 +661,7 @@ async def _record_async(model: dict):
                     file_start = time.time()
                     stop_reason = "shutdown"
                     seen_parts: set[str] = set()
+                    stall_count = 0
 
                     with open(output, "wb") as f:
                         f.write(init_data)
@@ -657,11 +678,16 @@ async def _record_async(model: dict):
 
                         while not shutdown.is_set():
                             try:
-                                url, body = await asyncio.wait_for(media_queue.get(), timeout=30.0)
+                                url, body = await asyncio.wait_for(media_queue.get(), timeout=LLHLS_QUEUE_TIMEOUT)
                             except asyncio.TimeoutError:
-                                log(username, "no new parts for 30s, stream may have ended")
+                                stall_count += 1
+                                if stall_count <= LLHLS_STALL_RETRIES and is_live(username):
+                                    log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}) but model still live; waiting")
+                                    continue
+                                log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}), stopping")
                                 stop_reason = "stream_ended"
                                 break
+                            stall_count = 0
                             if url not in seen_parts:
                                 seen_parts.add(url)
                                 f.write(body)
