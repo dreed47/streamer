@@ -132,6 +132,8 @@ def _transcode_file(username: str, path: Path, cfg: dict):
     vcodec = "libx265" if codec == "h265" else "libx264"
     preset = cfg.get("preset", "fast")
     threads = str(cfg.get("threads", 0))
+    # Safari/iOS requires hvc1 tag to recognize MP4-wrapped HEVC; without it iPad won't play
+    codec_extra = ["-tag:v", "hvc1"] if codec == "h265" else []
 
     tmp = Path("/tmp") / (path.stem + ".transcoding.mp4")
     tc_path = path.with_name(path.stem + "_tc" + path.suffix)
@@ -141,6 +143,7 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         "-i", str(path),
         "-c:v", vcodec, "-crf", str(crf), "-preset", preset, "-threads", threads,
         "-pix_fmt", "yuv420p",
+        *codec_extra,
         *audio_flags,
         "-movflags", "+faststart",
         "-y", str(tmp),
@@ -152,6 +155,7 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         "-i", str(path),
         "-c:v", vcodec, "-crf", str(crf), "-preset", preset, "-threads", threads,
         "-pix_fmt", "yuv420p",
+        *codec_extra,
         *audio_flags,
         "-movflags", "+faststart",
         "-y", str(tmp),
