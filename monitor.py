@@ -46,7 +46,7 @@ LLHLS_QUEUE_TIMEOUT = int(os.environ.get("LLHLS_QUEUE_TIMEOUT", "30"))
 LLHLS_STALL_RETRIES = int(os.environ.get("LLHLS_STALL_RETRIES", "12"))
 # ===============================================
 
-from state import active_recordings, resume_after, resume_reason, idle_reason, shutdown, config_lock, daily_file_counts
+from state import active_recordings, resume_after, resume_reason, idle_reason, stop_recording_events, shutdown, config_lock, daily_file_counts
 _browser_sem = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "3")))
 
 _UA = (
@@ -203,7 +203,8 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         tmp.unlink(missing_ok=True)
 
 
-def is_live(username: str) -> bool:
+def get_cam_status(username: str) -> tuple[bool, str | None]:
+    """Returns (is_live, show_type). show_type is None if unknown/public."""
     try:
         r = req_lib.get(
             f"https://stripchat.com/api/front/v2/models/username/{username}/cam",
@@ -212,16 +213,19 @@ def is_live(username: str) -> bool:
         )
         cam = r.json().get("cam", {})
         available = cam.get("isCamAvailable", False)
-        log(username, f"isCamAvailable={available}")
-        return available
+        show = cam.get("show")
+        show_type = show.get("type") if isinstance(show, dict) else None
+        log(username, f"cam: isCamAvailable={available} show_type={show_type}")
+        return available, show_type
     except Exception as e:
         log(username, f"API error: {e}")
-    return False
+    return False, None
 
 
 def _record_with_requests(
     username: str, stream_url: str, cookies_list: list, output_path: Path,
     time_limit: int | None = None, size_limit: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> str:
     sess = req_lib.Session()
     sess.headers.update({
@@ -274,7 +278,7 @@ def _record_with_requests(
 
     log(username, f"recording -> {output_path.name}")
     with open(output_path, "wb") as f:
-        while not shutdown.is_set():
+        while not shutdown.is_set() and not (stop_event and stop_event.is_set()):
             if llhls:
                 poll_url = f"{base_url}&_HLS_msn={next_msn}&_HLS_part={next_part}"
                 poll_timeout = 35
@@ -396,11 +400,13 @@ def _record_with_requests(
             if not llhls:
                 time.sleep(1)
 
+    if stop_event and stop_event.is_set() and stop_reason == "shutdown":
+        stop_reason = "private_show"
     log(username, f"done: {output_path.name}")
     return stop_reason
 
 
-async def _record_async(model: dict):
+async def _record_async(model: dict, stop_event: threading.Event | None = None):
     username = model["name"]
 
     time_limit = _parse_duration(model["recording_time_limit"]) if model.get("recording_time_limit") else None
@@ -680,12 +686,12 @@ async def _record_async(model: dict):
                             f.flush()
                             early_parts = []
 
-                        while not shutdown.is_set():
+                        while not shutdown.is_set() and not (stop_event and stop_event.is_set()):
                             try:
                                 url, body = await asyncio.wait_for(media_queue.get(), timeout=LLHLS_QUEUE_TIMEOUT)
                             except asyncio.TimeoutError:
                                 stall_count += 1
-                                if stall_count <= LLHLS_STALL_RETRIES and is_live(username):
+                                if stall_count <= LLHLS_STALL_RETRIES and get_cam_status(username)[0]:
                                     log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}) but model still live; waiting")
                                     continue
                                 log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}), stopping")
@@ -708,6 +714,8 @@ async def _record_async(model: dict):
                                 stop_reason = "size_limit"
                                 break
 
+                    if stop_event and stop_event.is_set() and stop_reason == "shutdown":
+                        stop_reason = "private_show"
                     log(username, f"done: {output.name}")
 
                     if TRANSCODE_CFG.get("enabled"):
@@ -758,7 +766,7 @@ async def _record_async(model: dict):
 
             stop_reason = await loop.run_in_executor(
                 None, _record_with_requests, username, stream_url, cookies, output,
-                effective_time_limit, effective_size_limit,
+                effective_time_limit, effective_size_limit, stop_event,
             )
 
             if TRANSCODE_CFG.get("enabled"):
@@ -799,7 +807,7 @@ async def _record_async(model: dict):
         active_recordings.pop(username, None)
 
 
-def record(model: dict):
+def record(model: dict, stop_event: threading.Event | None = None):
     username = model["name"]
     if not _browser_sem.acquire(blocking=False):
         log(username, "max concurrent browsers reached, will retry next poll")
@@ -808,7 +816,7 @@ def record(model: dict):
         return
     try:
         log(username, "browser launching to find stream URL...")
-        asyncio.run(_record_async(model))
+        asyncio.run(_record_async(model, stop_event))
     finally:
         _browser_sem.release()
 
@@ -832,15 +840,30 @@ def monitor():
                     continue
                 del resume_after[username]
                 resume_reason.pop(username, None)
+            is_online, show_type = get_cam_status(username)
+            private_or_ticket = show_type in ("private", "ticket")
+
             t = active_recordings.get(username)
             if t and t.is_alive():
-                idle_reason.pop(username, None)  # confirmed recording
+                if private_or_ticket:
+                    ev = stop_recording_events.get(username)
+                    if ev and not ev.is_set():
+                        ev.set()
+                        log(username, f"signaling stop — {show_type} show")
+                    idle_reason[username] = f"{show_type}_show"
+                else:
+                    idle_reason.pop(username, None)  # confirmed recording
                 continue
-            if is_live(username):
+
+            if is_online and not private_or_ticket:
                 idle_reason[username] = "starting"
-                t = threading.Thread(target=record, args=(model,), daemon=True)
+                ev = threading.Event()
+                stop_recording_events[username] = ev
+                t = threading.Thread(target=record, args=(model, ev), daemon=True)
                 t.start()
                 active_recordings[username] = t
+            elif is_online and private_or_ticket:
+                idle_reason[username] = f"{show_type}_show"
             else:
                 idle_reason[username] = "offline"
         time.sleep(POLL_INTERVAL)

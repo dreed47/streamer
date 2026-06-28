@@ -54,6 +54,10 @@ def _model_status(name: str, model: dict) -> tuple[str, str, str]:
         return "idle", "Starting…", "badge-warning"
     if reason == "no_stream":
         return "idle", "No stream", "badge-neutral"
+    if reason == "private_show":
+        return "idle", "Private show", "badge-neutral"
+    if reason == "ticket_show":
+        return "idle", "Ticket show", "badge-neutral"
     return "idle", "Idle", "badge-neutral"
 
 
@@ -72,7 +76,7 @@ def _rename_model_runtime_state(old_name: str, new_name: str):
     if old_name == new_name:
         return
 
-    for mapping in (_state.active_recordings, _state.resume_after, _state.resume_reason, _state.idle_reason):
+    for mapping in (_state.active_recordings, _state.resume_after, _state.resume_reason, _state.idle_reason, _state.stop_recording_events):
         if old_name in mapping and new_name not in mapping:
             mapping[new_name] = mapping.pop(old_name)
 
