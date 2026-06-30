@@ -866,6 +866,14 @@ def monitor():
                 idle_reason[username] = f"{show_type}_show"
             else:
                 idle_reason[username] = "offline"
+        config_names = {m["name"] for m in models}
+        for username, t in list(active_recordings.items()):
+            if username not in config_names and t.is_alive():
+                ev = stop_recording_events.get(username)
+                if ev and not ev.is_set():
+                    ev.set()
+                    log(username, "removed from config — signaling stop")
+
         time.sleep(POLL_INTERVAL)
 
 
@@ -894,8 +902,10 @@ def _init_daily_file_counts():
                 key = (username, date.today())
                 daily_file_counts[key] = daily_file_counts.get(key, 0) + 1
         if daily_file_counts:
+            config_names = {m["name"] for m in MODELS}
             for (u, _), cnt in daily_file_counts.items():
-                print(f"[{time.strftime('%H:%M:%S')}][{u}] startup: {cnt} recording(s) found for today", flush=True)
+                if u in config_names:
+                    print(f"[{time.strftime('%H:%M:%S')}][{u}] startup: {cnt} recording(s) found for today", flush=True)
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] init_daily_file_counts error: {e}", flush=True)
 
