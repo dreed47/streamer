@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -203,23 +204,78 @@ def _transcode_file(username: str, path: Path, cfg: dict):
         tmp.unlink(missing_ok=True)
 
 
+async def _get_cam_status_async(username: str) -> tuple[bool, str | None]:
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-setuid-sandbox",
+                    "--no-zygote",
+                    "--disable-gpu",
+                    "--disable-gpu-sandbox",
+                    "--single-process",
+                    "--mute-audio",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=_UA,
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            page = await context.new_page()
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda r: r.abort())
+            res = await page.goto(f"https://stripchat.com/{username}", wait_until="domcontentloaded", timeout=15000)
+            if not res or res.status != 200:
+                await browser.close()
+                return False, None
+            content = await page.content()
+            await browser.close()
+
+            m = re.search(r'window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})(?:\s*;?\s*</script>)', content, re.DOTALL)
+            if not m:
+                return False, None
+
+            st = json.loads(m.group(1))
+            vc = st.get("viewCam", {})
+            model = vc.get("model", {})
+            show = vc.get("show", {})
+
+            if not isinstance(model, dict):
+                return False, None
+
+            is_live = model.get("isLive", False) or model.get("isCamAvailable", False) or model.get("isCam", False)
+            status = model.get("status")
+
+            show_type = None
+            if isinstance(show, dict):
+                show_type = show.get("type")
+                if not show_type and "details" in show:
+                    details = show.get("details", {})
+                    if "groupShow" in details:
+                        show_type = details["groupShow"].get("type")
+
+            if not show_type and status in ("private", "ticket"):
+                show_type = status
+
+            log(username, f"cam: isLive={is_live} status={status} show_type={show_type}")
+            return bool(is_live), show_type
+    except Exception as e:
+        log(username, f"API error: {e}")
+        return False, None
+
+
 def get_cam_status(username: str) -> tuple[bool, str | None]:
     """Returns (is_live, show_type). show_type is None if unknown/public."""
     try:
-        r = req_lib.get(
-            f"https://stripchat.com/api/front/v2/models/username/{username}/cam",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15,
-        )
-        cam = r.json().get("cam", {})
-        available = cam.get("isCamAvailable", False)
-        show = cam.get("show")
-        show_type = show.get("type") if isinstance(show, dict) else None
-        log(username, f"cam: isCamAvailable={available} show_type={show_type}")
-        return available, show_type
-    except Exception as e:
-        log(username, f"API error: {e}")
-    return False, None
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(_get_cam_status_async(username))).result()
+    except RuntimeError:
+        return asyncio.run(_get_cam_status_async(username))
 
 
 def _record_with_requests(
@@ -691,7 +747,7 @@ async def _record_async(model: dict, stop_event: threading.Event | None = None):
                                 url, body = await asyncio.wait_for(media_queue.get(), timeout=LLHLS_QUEUE_TIMEOUT)
                             except asyncio.TimeoutError:
                                 stall_count += 1
-                                if stall_count <= LLHLS_STALL_RETRIES and get_cam_status(username)[0]:
+                                if stall_count <= LLHLS_STALL_RETRIES and (await _get_cam_status_async(username))[0]:
                                     log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}) but model still live; waiting")
                                     continue
                                 log(username, f"no new parts for {LLHLS_QUEUE_TIMEOUT}s (stall {stall_count}/{LLHLS_STALL_RETRIES}), stopping")
