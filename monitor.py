@@ -136,7 +136,10 @@ def _transcode_file(username: str, path: Path, cfg: dict):
     # Safari/iOS requires hvc1 tag to recognize MP4-wrapped HEVC; without it iPad won't play
     codec_extra = ["-tag:v", "hvc1"] if codec == "h265" else []
 
-    tmp = Path("/tmp") / (path.stem + ".transcoding.mp4")
+    # Write the temp re-encode next to the source (on /recordings / the NAS), NOT
+    # in /tmp. A killed ffmpeg leaves a multi-GB temp file behind; on the local
+    # writable layer that fills the host disk and crashes Docker.
+    tmp = path.with_name(path.stem + ".transcoding.mp4")
     tc_path = path.with_name(path.stem + "_tc" + path.suffix)
     audio_flags = ["-an"] if no_audio else ["-c:a", "aac", "-b:a", audio_br]
     cmd = [
@@ -879,6 +882,14 @@ def record(model: dict, stop_event: threading.Event | None = None):
 
 def monitor():
     while True:
+        if not recordings_available():
+            print(f"[{time.strftime('%H:%M:%S')}] /recordings is NOT mounted — pausing all recording this "
+                  f"cycle (refusing to write to the container's local disk). Check the NAS / CIFS mount.",
+                  flush=True)
+            for _u in list(active_recordings):
+                idle_reason[_u] = "recordings_unmounted"
+            time.sleep(POLL_INTERVAL)
+            continue
         with config_lock:
             models = _load_config().get("models", [])
         for model in models:
@@ -944,6 +955,49 @@ def _start_web():
         print(f"[{time.strftime('%H:%M:%S')}] Web UI failed to start: {e}", flush=True)
 
 
+REQUIRE_RECORDINGS_MOUNT = os.environ.get("REQUIRE_RECORDINGS_MOUNT", "true").lower() in ("1", "true", "yes")
+
+
+def recordings_available() -> bool:
+    """True if /recordings is safe to write to.
+
+    entrypoint.sh mounts the NAS over /recordings at startup. If that mount
+    later drops (NAS reboot, network blip), /recordings silently reverts to a
+    plain dir on the container's writable layer — and recordings + transcodes
+    then pile up on the host disk until Docker crashes. Refuse to write in that
+    state. Set REQUIRE_RECORDINGS_MOUNT=false for local runs without the mount.
+    """
+    if not REQUIRE_RECORDINGS_MOUNT:
+        return True
+    try:
+        return os.path.ismount(RECORDINGS_DIR)
+    except OSError:
+        return False
+
+
+def _sweep_stale_temp():
+    """Delete leftovers from a previous crash so they can't accumulate:
+    partial transcode outputs in /recordings, and Playwright/Chromium scratch
+    dirs in /tmp.
+    """
+    import glob
+    removed = 0
+    try:
+        for f in RECORDINGS_DIR.glob("*.transcoding.mp4"):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] sweep /recordings error: {e}", flush=True)
+    for d in glob.glob("/tmp/playwright-artifacts-*") + glob.glob("/tmp/.org.chromium.Chromium.*"):
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+    if removed:
+        print(f"[{time.strftime('%H:%M:%S')}] startup sweep: removed {removed} stale temp item(s)", flush=True)
+
+
 def _init_daily_file_counts():
     """Scan existing recordings to pre-populate daily_file_counts on startup."""
     today_str = date.today().strftime("%Y%m%d")
@@ -967,6 +1021,10 @@ def _init_daily_file_counts():
 
 
 if __name__ == "__main__":
+    _sweep_stale_temp()
+    if not recordings_available():
+        print(f"[{time.strftime('%H:%M:%S')}] WARNING: /recordings is not a mountpoint at startup — "
+              f"recording is paused until the mount appears.", flush=True)
     _init_daily_file_counts()
     web_thread = threading.Thread(target=_start_web, daemon=True)
     web_thread.start()
