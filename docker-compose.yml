@@ -17,6 +17,12 @@ services:
     # go to /recordings (the NAS), not here.
     tmpfs:
       - /tmp:size=2g,mode=1777
+    # Chromium (--single-process) segfaults routinely. The host kernel's
+    # core_pattern dumps a ~1.2GB core file per crash into the process CWD
+    # (/app, on the container writable layer) — 400+ of these filled the disk
+    # and crashed Docker. RLIMIT_CORE=0 stops the kernel writing them.
+    ulimits:
+      core: 0
     privileged: true
     environment:
       - TZ=${TZ:-Europe/London}   # change as needed

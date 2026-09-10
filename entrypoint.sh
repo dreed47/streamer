@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Belt-and-suspenders with compose `ulimits.core: 0`: never let a Chromium
+# segfault write a multi-GB core file into /app (fills the host disk).
+ulimit -c 0
+
 mkdir -p /recordings
 
 echo "username=$SMB_USERNAME" > /tmp/smb.cred

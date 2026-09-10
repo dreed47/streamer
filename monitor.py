@@ -977,8 +977,9 @@ def recordings_available() -> bool:
 
 def _sweep_stale_temp():
     """Delete leftovers from a previous crash so they can't accumulate:
-    partial transcode outputs in /recordings, and Playwright/Chromium scratch
-    dirs in /tmp.
+    partial transcode outputs in /recordings, Playwright/Chromium scratch dirs
+    in /tmp, and Chromium core dumps in /app (each ~1GB; the kernel writes them
+    here on every segfault unless RLIMIT_CORE is 0).
     """
     import glob
     removed = 0
@@ -994,6 +995,12 @@ def _sweep_stale_temp():
     for d in glob.glob("/tmp/playwright-artifacts-*") + glob.glob("/tmp/.org.chromium.Chromium.*"):
         shutil.rmtree(d, ignore_errors=True)
         removed += 1
+    for c in glob.glob("/app/core") + glob.glob("/app/core.*"):
+        try:
+            os.unlink(c)
+            removed += 1
+        except OSError:
+            pass
     if removed:
         print(f"[{time.strftime('%H:%M:%S')}] startup sweep: removed {removed} stale temp item(s)", flush=True)
 
