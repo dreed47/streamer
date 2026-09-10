@@ -890,6 +890,21 @@ def monitor():
                 idle_reason[_u] = "recordings_unmounted"
             time.sleep(POLL_INTERVAL)
             continue
+        if not local_disk_ok():
+            free_mb = local_disk_free_mb()
+            print(f"[{time.strftime('%H:%M:%S')}] LOW DISK: only {free_mb} MB free on / "
+                  f"(need {MIN_FREE_DISK_MB} MB). Sweeping stale temp and pausing ALL recording this "
+                  f"cycle so a full disk can't wedge Docker. Free space on / or lower MIN_FREE_DISK_MB.",
+                  flush=True)
+            _sweep_stale_temp()
+            for _u in list(active_recordings):
+                ev = stop_recording_events.get(_u)
+                if ev and not ev.is_set():
+                    ev.set()
+                    log(_u, "signaling stop — low disk")
+                idle_reason[_u] = "low_disk"
+            time.sleep(POLL_INTERVAL)
+            continue
         with config_lock:
             models = _load_config().get("models", [])
         for model in models:
@@ -975,6 +990,31 @@ def recordings_available() -> bool:
         return False
 
 
+# Minimum free space (MB) required on the container's writable layer / host root
+# disk before the app will start or continue new recordings. Historically this
+# disk filled (leaked Chromium core dumps in /app, orphaned transcode temp
+# files, container logs) and wedged Docker. /recordings (the NAS) and /tmp
+# (tmpfs) are NOT on this disk. Set to 0 to disable the check.
+MIN_FREE_DISK_MB = int(os.environ.get("MIN_FREE_DISK_MB", "5000"))
+
+
+def local_disk_free_mb() -> int:
+    """Free space (MB) on '/', or -1 if it can't be measured."""
+    try:
+        return shutil.disk_usage("/").free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def local_disk_ok() -> bool:
+    """False when '/' is below MIN_FREE_DISK_MB free. Fails open (True) if the
+    check is disabled or the free space can't be read."""
+    if MIN_FREE_DISK_MB <= 0:
+        return True
+    free = local_disk_free_mb()
+    return free < 0 or free >= MIN_FREE_DISK_MB
+
+
 def _sweep_stale_temp():
     """Delete leftovers from a previous crash so they can't accumulate:
     partial transcode outputs in /recordings, Playwright/Chromium scratch dirs
@@ -1032,6 +1072,9 @@ if __name__ == "__main__":
     if not recordings_available():
         print(f"[{time.strftime('%H:%M:%S')}] WARNING: /recordings is not a mountpoint at startup — "
               f"recording is paused until the mount appears.", flush=True)
+    if not local_disk_ok():
+        print(f"[{time.strftime('%H:%M:%S')}] WARNING: only {local_disk_free_mb()} MB free on / at startup "
+              f"(threshold {MIN_FREE_DISK_MB} MB) — recording is paused until space is freed.", flush=True)
     _init_daily_file_counts()
     web_thread = threading.Thread(target=_start_web, daemon=True)
     web_thread.start()
