@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 import threading
@@ -45,6 +46,19 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))
 LLHLS_QUEUE_TIMEOUT = int(os.environ.get("LLHLS_QUEUE_TIMEOUT", "30"))
 LLHLS_STALL_RETRIES = int(os.environ.get("LLHLS_STALL_RETRIES", "12"))
+# Chromium segfaults leave scratch in /tmp. rmtree() skips the files, and a
+# sweep that runs only at startup lets them fill the tmpfs. The browser then
+# fails with ERR_INSUFFICIENT_RESOURCES. Sweep every poll. Keep anything a
+# live browser still has open, and anything newer than this, so a recording
+# that just started is not deleted out from under it.
+TMP_SWEEP_MIN_AGE_S = int(os.environ.get("TMP_SWEEP_MIN_AGE_S", "600"))
+TMP_MIN_FREE_MB = int(os.environ.get("TMP_MIN_FREE_MB", "128"))
+_SCRATCH_ROOTS = ("/tmp", "/dev/shm")
+_SCRATCH_PREFIXES = (
+    "playwright-artifacts-",
+    "playwright_chromiumdev_profile-",
+    ".org.chromium.Chromium.",
+)
 # ===============================================
 
 from state import active_recordings, resume_after, resume_reason, idle_reason, stop_recording_events, shutdown, config_lock, daily_file_counts
@@ -882,6 +896,7 @@ def record(model: dict, stop_event: threading.Event | None = None):
 
 def monitor():
     while True:
+        _housekeep()
         if not recordings_available():
             print(f"[{time.strftime('%H:%M:%S')}] /recordings is NOT mounted — pausing all recording this "
                   f"cycle (refusing to write to the container's local disk). Check the NAS / CIFS mount.",
@@ -903,6 +918,13 @@ def monitor():
                     ev.set()
                     log(_u, "signaling stop — low disk")
                 idle_reason[_u] = "low_disk"
+            time.sleep(POLL_INTERVAL)
+            continue
+        free_tmp = tmp_free_mb()
+        if TMP_MIN_FREE_MB > 0 and 0 <= free_tmp < TMP_MIN_FREE_MB:
+            print(f"[{time.strftime('%H:%M:%S')}] /tmp has only {free_tmp} MB free "
+                  f"(need {TMP_MIN_FREE_MB} MB) after sweep — skipping new browsers this cycle.",
+                  flush=True)
             time.sleep(POLL_INTERVAL)
             continue
         with config_lock:
@@ -1015,16 +1037,140 @@ def local_disk_ok() -> bool:
     return free < 0 or free >= MIN_FREE_DISK_MB
 
 
-def _sweep_stale_temp():
-    """Delete leftovers from a previous crash so they can't accumulate:
-    partial transcode outputs in /recordings, Playwright/Chromium scratch dirs
-    in /tmp, and Chromium core dumps in /app (each ~1GB; the kernel writes them
-    here on every segfault unless RLIMIT_CORE is 0).
+def tmp_free_mb() -> int:
+    """Free space (MB) on /tmp, or -1 if it can't be measured."""
+    try:
+        return shutil.disk_usage("/tmp").free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def _paths_in_use(roots: tuple[str, ...]) -> set[str]:
+    """Absolute paths under roots held open or mapped by a running process."""
+    used: set[str] = set()
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return used
+    root_prefixes = tuple(r.rstrip("/") + os.sep for r in roots)
+
+    def consider(target: str):
+        target = target.strip().removesuffix(" (deleted)")
+        if target.startswith(root_prefixes):
+            used.add(target)
+
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        base = f"/proc/{pid}"
+        links = [f"{base}/cwd"]
+        try:
+            fds = os.listdir(f"{base}/fd")
+        except OSError:
+            fds = []
+        links.extend(f"{base}/fd/{fd}" for fd in fds)
+        for link in links:
+            try:
+                consider(os.readlink(link))
+            except OSError:
+                continue
+        try:
+            with open(f"{base}/maps") as maps:
+                for line in maps:
+                    parts = line.split(None, 5)
+                    if len(parts) == 6 and parts[5].startswith("/"):
+                        consider(parts[5])
+        except OSError:
+            continue
+    return used
+
+
+def _path_in_use(path: str, used: set[str]) -> bool:
+    if path in used:
+        return True
+    prefix = path + os.sep
+    return any(u.startswith(prefix) for u in used)
+
+
+def _unlink_or_rmtree(path: str) -> bool:
+    """Remove a scratch file or directory. rmtree() on a file does nothing."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return False
+    try:
+        if stat.S_ISLNK(mode):
+            return False
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(path)
+        elif stat.S_ISREG(mode):
+            os.unlink(path)
+        else:
+            return False
+    except OSError:
+        return False
+    return not os.path.lexists(path)
+
+
+def _reap_dead_browsers() -> int:
+    """Reap zombie Chromium children.
+
+    Python is PID 1 here, so a crashed browser stays a zombie until something
+    waits on it. Only chrome is reaped, so another thread's ffmpeg wait() is
+    left alone.
+    """
+    reaped = 0
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return 0
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        end = raw.rfind(")")
+        if end < 0 or end + 2 >= len(raw):
+            continue
+        comm = raw[raw.find("(") + 1:end]
+        state = raw[end + 2:].split(None, 1)[0]
+        if state != "Z" or "chrom" not in comm:
+            continue
+        try:
+            got, _ = os.waitpid(int(pid), os.WNOHANG)
+        except (ChildProcessError, OSError, PermissionError):
+            continue
+        if got:
+            reaped += 1
+    return reaped
+
+
+def _sweep_stale_temp(startup: bool = False) -> int:
+    """Delete leftovers from a previous crash so they can't accumulate.
+
+    Partial transcode outputs in /recordings, Playwright/Chromium scratch in
+    /tmp and /dev/shm, and Chromium core dumps in /app. Scratch from Chromium
+    is a mix of files and profile directories. A live recording holds its
+    scratch open, so those paths are kept. On startup nothing is recording
+    yet, so age is ignored.
     """
     import glob
     removed = 0
+    min_age = 0 if startup else TMP_SWEEP_MIN_AGE_S
+    now = time.time()
+    used = _paths_in_use(_SCRATCH_ROOTS + (str(RECORDINGS_DIR),))
+
     try:
         for f in RECORDINGS_DIR.glob("*.transcoding.mp4"):
+            try:
+                age = now - f.stat().st_mtime
+            except OSError:
+                continue
+            if age < min_age or _path_in_use(str(f), used):
+                continue
             try:
                 f.unlink()
                 removed += 1
@@ -1032,17 +1178,48 @@ def _sweep_stale_temp():
                 pass
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] sweep /recordings error: {e}", flush=True)
-    for d in glob.glob("/tmp/playwright-artifacts-*") + glob.glob("/tmp/.org.chromium.Chromium.*"):
-        shutil.rmtree(d, ignore_errors=True)
-        removed += 1
+
+    for root in _SCRATCH_ROOTS:
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            if not name.startswith(_SCRATCH_PREFIXES):
+                continue
+            path = os.path.join(root, name)
+            try:
+                age = now - os.lstat(path).st_mtime
+            except OSError:
+                continue
+            if age < min_age or _path_in_use(path, used):
+                continue
+            if _unlink_or_rmtree(path):
+                removed += 1
+
     for c in glob.glob("/app/core") + glob.glob("/app/core.*"):
         try:
             os.unlink(c)
             removed += 1
         except OSError:
             pass
-    if removed:
-        print(f"[{time.strftime('%H:%M:%S')}] startup sweep: removed {removed} stale temp item(s)", flush=True)
+    return removed
+
+
+def _housekeep(startup: bool = False):
+    try:
+        removed = _sweep_stale_temp(startup=startup)
+        reaped = _reap_dead_browsers()
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] sweep error: {e}", flush=True)
+        return
+    if removed or reaped:
+        parts = []
+        if removed:
+            parts.append(f"removed {removed} stale temp item(s)")
+        if reaped:
+            parts.append(f"reaped {reaped} dead browser process(es)")
+        print(f"[{time.strftime('%H:%M:%S')}] sweep: {', '.join(parts)}", flush=True)
 
 
 def _init_daily_file_counts():
@@ -1068,7 +1245,7 @@ def _init_daily_file_counts():
 
 
 if __name__ == "__main__":
-    _sweep_stale_temp()
+    _housekeep(startup=True)
     if not recordings_available():
         print(f"[{time.strftime('%H:%M:%S')}] WARNING: /recordings is not a mountpoint at startup — "
               f"recording is paused until the mount appears.", flush=True)
