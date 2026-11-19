@@ -24,14 +24,34 @@ _CONFIG = _load_config()
 MODELS = _CONFIG["models"]
 
 _MOUFLON_MSN_RE = re.compile(r'/\d+_(\d+)_[A-Za-z0-9]+/')
+# Current part names look like ..._h264_<msn>_<token>_<epoch>_part<n>.mp4
+_MOUFLON_FILE_MSN_RE = re.compile(r'_(?:h264|hevc|av1|vp9)_(\d+)_[A-Za-z0-9]+_\d+')
 _MOUFLON_PART_RE = re.compile(r'_part(\d+)\.mp4')
+_MOUFLON_PSCH_RE = re.compile(r'#EXT-X-MOUFLON:PSCH:[^:\s]+:([A-Za-z0-9]+)')
 
 def _mouflon_msn_part(url: str) -> tuple[int | None, int | None]:
-    msn_m = _MOUFLON_MSN_RE.search(url)
     part_m = _MOUFLON_PART_RE.search(url)
-    if msn_m and part_m:
-        return int(msn_m.group(1)), int(part_m.group(1))
-    return None, None
+    if not part_m:
+        return None, None
+    msn_m = _MOUFLON_MSN_RE.search(url) or _MOUFLON_FILE_MSN_RE.search(url)
+    if not msn_m:
+        return None, None
+    return int(msn_m.group(1)), int(part_m.group(1))
+
+def _playlist_path(url: str) -> str:
+    return url.split("?", 1)[0]
+
+def _with_pkey(url: str, key: str) -> str:
+    if "pkey=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}psch=v2&pkey={key}"
+
+def _pick_variant_url(urls: list[str]) -> str | None:
+    """Prefer a low-latency playlist. Resource timing no longer lists these."""
+    msn = [u for u in urls if "_HLS_msn=" in u]
+    pool = msn or urls
+    return pool[-1] if pool else None
 TRANSCODE_CFG: dict = {
     "enabled":       os.environ.get("TRANSCODE_ENABLED", "").lower() in ("1", "true", "yes"),
     "codec":         os.environ.get("TRANSCODE_CODEC", "h264"),
@@ -542,18 +562,32 @@ async def _record_async(model: dict, stop_event: threading.Event | None = None):
         )
 
         master_url: list[str] = []
+        # The player fetches the media playlist itself. performance.getEntries()
+        # no longer includes those URLs, so remember them from the network.
+        variant_urls: list[str] = []
+
+        def _remember_variant(url: str):
+            low = url.lower()
+            if "m3u8" not in low or "ping" in low or "master" in low or "pkey=" not in url:
+                return
+            if url not in variant_urls:
+                variant_urls.append(url)
 
         async def on_response(response):
             url = response.url
-            # Master playlist detection
-            if "m3u8" in url and not master_url:
-                try:
-                    body = await response.text()
-                    if "#EXT-X-STREAM-INF" in body:
-                        log(username, f"master: ...{url[-80:]}")
-                        master_url.append(url)
-                except Exception:
-                    pass
+            if "m3u8" in url and "ping" not in url:
+                _remember_variant(url)
+                # Master playlist has no pkey. Reading its body is how we learn
+                # it is the master. Media playlists are left unread for the player.
+                if "master" in url.lower() or "pkey=" not in url:
+                    if not master_url:
+                        try:
+                            body = await response.text()
+                            if "#EXT-X-STREAM-INF" in body:
+                                log(username, f"master: ...{_playlist_path(url)[-80:]}")
+                                master_url.append(url)
+                        except Exception:
+                            pass
                 return
             # MOUFLON segment capture: browser fetches real part/init URLs;
             # capture bytes here so we never need to re-download from CDN
@@ -605,33 +639,37 @@ async def _record_async(model: dict, stop_event: threading.Event | None = None):
                 for url in perf_urls:
                     if url not in seen_perf:
                         seen_perf.add(url)
-                        if "m3u8" in url:
-                            log(username, f"perf[{attempt}]: ...{url[-90:]}")
-                pkey_urls = [u for u in perf_urls
-                             if "m3u8" in u and "pkey=" in u
-                             and "ping" not in u and "master" not in u.lower()]
-                other_variants = [u for u in perf_urls
-                                  if "m3u8" in u and "ping" not in u
-                                  and "master" not in u.lower()]
-                candidates = pkey_urls or other_variants
-                if candidates:
-                    stream_url = candidates[-1]
-                    log(username, f"stream URL via perf: ...{stream_url[-90:]}")
-                    break
-                for u in perf_urls:
-                    if "m3u8" in u and "master" in u.lower() and "ping" not in u and u not in perf_master_urls:
-                        perf_master_urls.append(u)
+                        if "m3u8" in url and "ping" not in url:
+                            log(username, f"perf[{attempt}]: ...{_playlist_path(url)[-80:]}")
+                    _remember_variant(url)
+                    if "m3u8" in url and "master" in url.lower() and "ping" not in url and url not in perf_master_urls:
+                        perf_master_urls.append(url)
             except Exception as e:
                 log(username, f"perf query error: {e}")
+            chosen = _pick_variant_url(variant_urls)
+            if chosen and "_HLS_msn=" in chosen:
+                stream_url = chosen
+                log(username, f"stream URL via network: ...{_playlist_path(stream_url)[-80:]}")
+                break
+
+        if not stream_url:
+            chosen = _pick_variant_url(variant_urls)
+            if chosen:
+                stream_url = chosen
+                log(username, f"stream URL via network: ...{_playlist_path(stream_url)[-80:]}")
 
         if not stream_url and not master_url and perf_master_urls:
-            log(username, f"on_response missed master — using perf master: ...{perf_master_urls[-1][-80:]}")
+            log(username, f"on_response missed master — using perf master: ...{_playlist_path(perf_master_urls[-1])[-80:]}")
             master_url.extend(perf_master_urls)
 
         if not stream_url and master_url:
-            log(username, "perf found no variant — trying context.request fallback")
+            # A variant URL from the master, fetched with no pkey, is an ended
+            # playlist. The live one needs a PSCH key published on the master.
+            log(username, "no authed playlist seen — trying master with PSCH key")
             try:
-                mr = await context.request.get(master_url[0], timeout=10_000)
+                mr = await context.request.get(master_url[0], timeout=10_000, headers={
+                    "Referer": f"https://stripchat.com/{username}",
+                })
                 mbody = await mr.text()
                 lines = mbody.splitlines()
                 best_bw, best_var = -1, None
@@ -649,15 +687,22 @@ async def _record_async(model: dict, stop_event: threading.Event | None = None):
                         if nxt and not nxt.startswith("#") and bw > best_bw:
                             best_bw = bw
                             best_var = nxt if nxt.startswith("http") else urljoin(mbase, nxt)
+                keys = _MOUFLON_PSCH_RE.findall(mbody)
                 if best_var:
-                    log(username, f"fetching variant: ...{best_var[-80:]}")
-                    vr = await context.request.get(best_var, timeout=10_000)
-                    vbody = await vr.text()
-                    if "#EXTINF" in vbody and "#EXT-X-ENDLIST" not in vbody:
-                        stream_url = best_var
-                        log(username, "variant is live")
-                    else:
-                        log(username, f"variant not live (endlist={'#EXT-X-ENDLIST' in vbody})")
+                    log(username, f"fetching variant: ...{_playlist_path(best_var)[-70:]} ({len(keys)} keys)")
+                    trials = [_with_pkey(best_var, key) for key in keys] or [best_var]
+                    for trial_url in trials:
+                        vr = await context.request.get(trial_url, timeout=10_000, headers={
+                            "Referer": f"https://stripchat.com/{username}",
+                        })
+                        vbody = await vr.text()
+                        live = ("#EXTINF" in vbody or "#EXT-X-PART" in vbody) and "#EXT-X-ENDLIST" not in vbody
+                        if live:
+                            stream_url = trial_url
+                            log(username, "variant is live")
+                            break
+                    if not stream_url:
+                        log(username, "variant not live")
             except Exception as e:
                 log(username, f"context.request fallback error: {e}")
 
